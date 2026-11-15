@@ -1,13 +1,17 @@
 //! Lädt ffmpeg beim ersten Start automatisch neben die exe (portabel) und prüft,
 //! dass die Version die benötigten Funktionen hat (gdigrab, libx264, aac, amix).
+//! Ermittelt außerdem per Probelauf, welche Hardwarebeschleunigung (ddagrab, NVENC, QSV, AMF)
+//! auf diesem Rechner wirklich funktioniert.
 
 use crate::config::exe_dir;
+use crate::plan::{probe_ddagrab_args, probe_sw_args, Caps, Encoder};
 use crate::rec::ffcmd;
 use anyhow::{anyhow, bail, Context, Result};
 use std::fs::File;
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex};
+use std::process::Stdio;
+use std::sync::{Arc, Mutex, OnceLock};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -39,12 +43,68 @@ fn run_ok(p: &Path, args: &[&str]) -> Option<String> {
     }
 }
 
-pub fn supports_ddagrab(p: &Path) -> bool {
-    run_ok(p, &["-devices"]).map(|s| s.contains("ddagrab")).unwrap_or(false)
+/// Führt ffmpeg mit den Argumenten aus und meldet, ob es erfolgreich war (max. 12 s).
+fn probe(p: &Path, args: &[String]) -> bool {
+    let mut c = ffcmd(p);
+    c.args(["-y", "-hide_banner", "-loglevel", "error", "-nostats"])
+        .args(args)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+    let Ok(mut child) = c.spawn() else {
+        return false;
+    };
+    let deadline = Instant::now() + Duration::from_secs(12);
+    loop {
+        match child.try_wait() {
+            Ok(Some(st)) => return st.success(),
+            Ok(None) => {}
+            Err(_) => return false,
+        }
+        if Instant::now() > deadline {
+            let _ = child.kill();
+            let _ = child.wait();
+            return false;
+        }
+        thread::sleep(Duration::from_millis(50));
+    }
 }
 
-pub fn supports_qsv(p: &Path) -> bool {
-    run_ok(p, &["-encoders"]).map(|s| s.contains("h264_qsv")).unwrap_or(false)
+/// Ermittelt per Probelauf, was auf diesem Rechner wirklich funktioniert. Die Encoderliste von
+/// ffmpeg reicht dafür nicht: sie zeigt nur, was einkompiliert ist (`h264_qsv` steht auch ohne
+/// Intel-GPU drin). Die Probeläufe laufen parallel.
+fn detect(p: &Path) -> Caps {
+    thread::scope(|sc| {
+        let dd = sc.spawn(|| probe(p, &probe_ddagrab_args(Encoder::X264)));
+        let hw: Vec<_> = Encoder::HW
+            .iter()
+            .map(|&e| sc.spawn(move || (e, probe(p, &probe_ddagrab_args(e)), probe(p, &probe_sw_args(e)))))
+            .collect();
+        let mut caps = Caps { ddagrab_x264: dd.join().unwrap_or(false), ..Default::default() };
+        for h in hw {
+            if let Ok((e, gpu_frames, ram_frames)) = h.join() {
+                if gpu_frames {
+                    caps.hw_path.push(e);
+                }
+                if ram_frames {
+                    caps.sw_path.push(e);
+                }
+            }
+        }
+        caps
+    })
+}
+
+static CAPS: OnceLock<Caps> = OnceLock::new();
+
+/// Fähigkeiten dieses Systems. Beim ersten Aufruf werden die Probeläufe gemacht (dauert
+/// ein paar Sekunden), deshalb nicht im UI-Thread aufrufen - dort `caps_if_ready` benutzen.
+pub fn caps() -> &'static Caps {
+    CAPS.get_or_init(|| detect(&path()))
+}
+
+pub fn caps_if_ready() -> Option<&'static Caps> {
+    CAPS.get()
 }
 
 /// Prüft, ob die vorhandene ffmpeg.exe lauffähig ist und alles Nötige kann.
@@ -139,6 +199,7 @@ pub fn ensure(state: Arc<Mutex<FfState>>, ctx: eframe::egui::Context) {
     thread::spawn(move || {
         set(&state, &ctx, FfState::Checking);
         if is_usable(&path()) {
+            let _ = caps(); // Hardware-Probeläufe, solange der Status noch "Checking" ist
             set(&state, &ctx, FfState::Ready);
             return;
         }
@@ -146,6 +207,8 @@ pub fn ensure(state: Arc<Mutex<FfState>>, ctx: eframe::egui::Context) {
         for url in URLS {
             match fetch(url, &state, &ctx) {
                 Ok(()) => {
+                    set(&state, &ctx, FfState::Checking);
+                    let _ = caps();
                     set(&state, &ctx, FfState::Ready);
                     return;
                 }

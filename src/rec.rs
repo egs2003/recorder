@@ -1,6 +1,6 @@
 use crate::config::{Mode, Settings, SourceId};
-use crate::ffmpeg::{supports_ddagrab, supports_qsv};
 use crate::indicator::Indicator;
+use crate::plan::{self, Area, Job, Plan};
 use crate::winapi;
 use anyhow::{anyhow, bail, Context, Result};
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
@@ -9,7 +9,7 @@ use std::fs::File;
 use std::io::{BufRead, BufReader, BufWriter, Write};
 use std::os::windows::process::CommandExt;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::process::{Child, Command, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{mpsc, Arc, Mutex};
 use std::thread;
@@ -27,6 +27,8 @@ pub enum RecState {
 pub struct Handle {
     pub stop: Arc<AtomicBool>,
     pub state: Arc<Mutex<RecState>>,
+    /// Beschreibung des tatsächlich verwendeten Verfahrens, z. B. "GPU-Aufnahme + NVIDIA NVENC"
+    pub info: Arc<Mutex<String>>,
 }
 
 // ---------------------------------------------------------------- ffmpeg
@@ -51,8 +53,6 @@ fn log_tail(p: &Path) -> String {
     s[start..].to_string()
 }
 
-type Area = (i32, i32, i32, i32);
-
 /// Schneidet den Bereich auf den virtuellen Desktop zu und macht Breite/Höhe gerade.
 fn clamp_area(a: Area, v: Area) -> Result<Area> {
     let x0 = a.0.max(v.0);
@@ -66,55 +66,16 @@ fn clamp_area(a: Area, v: Area) -> Result<Area> {
     Ok((x0, y0, w, h))
 }
 
-fn ffmpeg_input_format() -> &'static str {
-    if supports_ddagrab(&find_ffmpeg()) {
-        "ddagrab"
-    } else {
-        "gdigrab"
-    }
-}
-
-fn ffmpeg_video_encoder() -> (&'static str, &'static str, &'static str) {
-    if supports_qsv(&find_ffmpeg()) {
-        ("h264_qsv", "veryfast", "23")
-    } else {
-        ("libx264", "ultrafast", "27")
-    }
-}
-
-/// Liefert die ffmpeg-Eingabeargumente und den aufgenommenen Bereich (für den roten Rahmen).
-fn input_args(s: &Settings) -> Result<(Vec<String>, Area)> {
-    let mons = winapi::list_monitors();
-    let virt = winapi::virtual_bounds(&mons);
-    let input = ffmpeg_input_format();
-    let mut a = vec![
-        "-f".to_string(),
-        input.to_string(),
-        "-framerate".to_string(),
-        s.fps.to_string(),
-        "-draw_mouse".to_string(),
-        "1".to_string(),
-    ];
-
-    let rect = |a: &mut Vec<String>, r: Area| {
-        a.extend(["-offset_x".to_string(), r.0.to_string()]);
-        a.extend(["-offset_y".to_string(), r.1.to_string()]);
-        a.extend(["-video_size".to_string(), format!("{}x{}", r.2, r.3)]);
-        a.extend(["-i".to_string(), "desktop".to_string()]);
-    };
-
-    let area: Area;
+/// Ermittelt den aufzunehmenden Bereich (virtuelle Desktop-Koordinaten). Der zweite Wert sagt,
+/// ob es der gesamte virtuelle Desktop ist.
+fn capture_area(s: &Settings, mons: &[winapi::Monitor], virt: Area) -> Result<(Area, bool)> {
     match s.mode {
-        Mode::Desktop => {
-            a.extend(["-i".to_string(), "desktop".to_string()]);
-            area = virt;
-        }
+        Mode::Desktop => Ok((virt, true)),
         Mode::Monitor => {
             let m = mons
                 .get(s.monitor)
                 .ok_or_else(|| anyhow!("Monitor {} nicht gefunden", s.monitor + 1))?;
-            area = (m.x, m.y, m.w, m.h);
-            rect(&mut a, area);
+            Ok(((m.x, m.y, m.w, m.h), false))
         }
         Mode::Window => {
             if s.window_title.trim().is_empty() {
@@ -125,27 +86,24 @@ fn input_args(s: &Settings) -> Result<(Vec<String>, Area)> {
             winapi::bring_to_front(hwnd);
             thread::sleep(Duration::from_millis(500));
             let r = winapi::window_rect(hwnd).ok_or_else(|| anyhow!("Fensterposition nicht ermittelbar"))?;
-            area = clamp_area(r, virt)?;
-            rect(&mut a, area);
+            Ok((clamp_area(r, virt)?, false))
         }
         Mode::Region => {
             let r = &s.region;
-            area = clamp_area((r.x, r.y, r.w, r.h), virt)?;
-            rect(&mut a, area);
+            Ok((clamp_area((r.x, r.y, r.w, r.h), virt)?, false))
         }
     }
-    Ok((a, area))
 }
 
-/// Einzelbild des gesamten Desktops (für die Bereichsauswahl).
+/// Einzelbild des gesamten Desktops (für die Bereichsauswahl). Immer per gdigrab: nur das
+/// erfasst zuverlässig alle Monitore zusammen.
 pub fn screenshot() -> Result<(usize, usize, Vec<u8>)> {
     let ff = find_ffmpeg();
     let png = std::env::temp_dir().join("rec_screenshot.png");
     let _ = std::fs::remove_file(&png);
-    let input = ffmpeg_input_format();
     let out = ffcmd(&ff)
         .args(["-y", "-hide_banner", "-loglevel", "error"])
-        .args(["-f", input, "-draw_mouse", "0", "-framerate", "1", "-i", "desktop"])
+        .args(["-f", "gdigrab", "-draw_mouse", "0", "-framerate", "1", "-i", "desktop"])
         .args(["-frames:v", "1", "-vf", "scale=1920:-1"])
         .arg(&png)
         .output()
@@ -270,12 +228,6 @@ fn open_audio(host: &cpal::Host, id: &SourceId, wav: &Path) -> Result<(Stream, A
         bits_per_sample: 32,
         sample_format: hound::SampleFormat::Float,
     };
-    let writer = hound::WavSpec {
-        channels: cfg.channels(),
-        sample_rate: cfg.sample_rate().0,
-        bits_per_sample: 32,
-        sample_format: hound::SampleFormat::Float,
-    };
     let writer = hound::WavWriter::create(wav, spec).context("WAV-Datei anlegen")?;
     let state = Arc::new(Mutex::new(AudioState {
         writer: Some(writer),
@@ -293,9 +245,10 @@ fn open_audio(host: &cpal::Host, id: &SourceId, wav: &Path) -> Result<(Stream, A
 pub fn start(s: Settings, ctx: eframe::egui::Context) -> Handle {
     let stop = Arc::new(AtomicBool::new(false));
     let state = Arc::new(Mutex::new(RecState::Starting));
-    let (stop2, state2) = (stop.clone(), state.clone());
+    let info = Arc::new(Mutex::new(String::new()));
+    let (stop2, state2, info2) = (stop.clone(), state.clone(), info.clone());
     thread::spawn(move || {
-        let res = run(&s, &stop2, &state2, &ctx);
+        let res = run(&s, &stop2, &state2, &info2, &ctx);
         *state2.lock().unwrap() = match res {
             Ok(p) => RecState::Done(p),
             Err(e) => RecState::Failed(format!("{e:#}")),
@@ -306,12 +259,81 @@ pub fn start(s: Settings, ctx: eframe::egui::Context) -> Handle {
         }
         ctx.request_repaint();
     });
-    Handle { stop, state }
+    Handle { stop, state, info }
 }
 
-fn run(s: &Settings, stop: &AtomicBool, state: &Mutex<RecState>, ctx: &eframe::egui::Context) -> Result<PathBuf> {
+/// Startet ffmpeg mit einem Aufnahmeplan und wartet auf das erste aufgenommene Bild.
+/// Schlägt der Start fehl (Encoder/GPU nicht verfügbar, Zeitüberschreitung), wird ffmpeg
+/// beendet und ein Fehler mit dem Ende des ffmpeg-Logs zurückgegeben.
+fn start_ffmpeg(
+    ffmpeg: &Path,
+    pl: Plan,
+    job: &Job,
+    video_tmp: &Path,
+    log_path: &Path,
+    stop: &AtomicBool,
+) -> Result<Child> {
+    let log = File::create(log_path)?;
+    let mut cmd = ffcmd(ffmpeg);
+    cmd.args(["-y", "-hide_banner", "-loglevel", "error", "-nostats"])
+        .args(plan::video_args(pl, job))
+        .args(["-progress", "pipe:1"])
+        .arg(video_tmp)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::from(log));
+    let mut ff = cmd
+        .spawn()
+        .context("ffmpeg.exe konnte nicht gestartet werden (muss neben recorder.exe liegen)")?;
+
+    let stdout = ff.stdout.take().context("ffmpeg-Ausgabe nicht verfügbar")?;
+    let (tx, rx) = mpsc::channel::<()>();
+    thread::spawn(move || {
+        let mut sent = false;
+        for line in BufReader::new(stdout).lines().map_while(Result::ok) {
+            if !sent {
+                if let Some(n) = line.strip_prefix("frame=") {
+                    if n.trim().parse::<u64>().unwrap_or(0) > 0 {
+                        let _ = tx.send(());
+                        sent = true;
+                    }
+                }
+            }
+        }
+    });
+
+    let deadline = Instant::now() + Duration::from_secs(15);
+    loop {
+        match rx.recv_timeout(Duration::from_millis(100)) {
+            Ok(()) => return Ok(ff),
+            Err(mpsc::RecvTimeoutError::Timeout) => {}
+            Err(mpsc::RecvTimeoutError::Disconnected) => {
+                let _ = ff.kill();
+                let _ = ff.wait();
+                bail!("ffmpeg lieferte keine Bilder: {}", log_tail(log_path));
+            }
+        }
+        if stop.load(Ordering::SeqCst) {
+            let _ = ff.kill();
+            let _ = ff.wait();
+            bail!("Abgebrochen");
+        }
+        if Instant::now() > deadline {
+            let _ = ff.kill();
+            let _ = ff.wait();
+            bail!("Zeitüberschreitung beim Start: {}", log_tail(log_path));
+        }
+    }
+}
+
+fn run(
+    s: &Settings,
+    stop: &AtomicBool,
+    state: &Mutex<RecState>,
+    info: &Mutex<String>,
+    ctx: &eframe::egui::Context,
+) -> Result<PathBuf> {
     let ffmpeg = find_ffmpeg();
-    let (video_codec, preset, crf) = ffmpeg_video_encoder();
     let out_dir = s.resolved_out_dir();
     std::fs::create_dir_all(&out_dir)
         .with_context(|| format!("Ausgabeordner nicht erstellbar: {}", out_dir.display()))?;
@@ -334,66 +356,45 @@ fn run(s: &Settings, stop: &AtomicBool, state: &Mutex<RecState>, ctx: &eframe::e
         thread::sleep(Duration::from_millis(700));
     }
 
-    let (input, area) = input_args(s)?;
+    let mons = winapi::list_monitors();
+    let virt = winapi::virtual_bounds(&mons);
+    let (area, full_desktop) = capture_area(s, &mons, virt)?;
+    let monitor = match mons.as_slice() {
+        [m] => Some((m.x, m.y, m.w, m.h)),
+        _ => None,
+    };
+    let job = Job { fps: s.fps, area, full_desktop, monitor };
+    // Hardware-Probeläufe sind normalerweise schon beim Programmstart passiert
+    let plans = plan::plans(&job, crate::ffmpeg::caps(), s.hw_accel);
     let indicator = Indicator::show(area.0, area.1, area.2, area.3);
 
-    let log = File::create(&log_path)?;
-    let mut ff = ffcmd(&ffmpeg)
-        .args(["-y", "-hide_banner", "-loglevel", "error", "-nostats"])
-        .args(&input)
-        .args(["-vf", "pad=ceil(iw/2)*2:ceil(ih/2)*2"])
-        .args(["-c:v", video_codec, "-preset", preset]);
-
-    if supports_qsv(&ffmpeg) {
-        ff.args(["-q:v", crf]);
-    } else {
-        ff.args(["-crf", crf]);
-    }
-
-    let ff = ff
-        .args(["-pix_fmt", "yuv420p", "-progress", "pipe:1"])
-        .arg(&video_tmp)
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::from(log))
-        .spawn()
-        .context("ffmpeg.exe konnte nicht gestartet werden (muss neben recorder.exe liegen)")?;
-
-    let stdout = ff.stdout.take().unwrap();
-    let (tx, rx) = mpsc::channel::<()>();
-    thread::spawn(move || {
-        let mut sent = false;
-        for line in BufReader::new(stdout).lines().map_while(Result::ok) {
-            if !sent {
-                if let Some(n) = line.strip_prefix("frame=") {
-                    if n.trim().parse::<u64>().unwrap_or(0) > 0 {
-                        let _ = tx.send(());
-                        sent = true;
-                    }
+    // Pläne der Reihe nach probieren, bis einer Bilder liefert
+    let mut started: Option<(Child, Plan)> = None;
+    let mut tried: Vec<String> = Vec::new();
+    let mut last_err = String::new();
+    for p in &plans {
+        match start_ffmpeg(&ffmpeg, *p, &job, &video_tmp, &log_path, stop) {
+            Ok(child) => {
+                started = Some((child, *p));
+                break;
+            }
+            Err(e) => {
+                if stop.load(Ordering::SeqCst) {
+                    bail!("Abgebrochen");
                 }
+                tried.push(p.label());
+                last_err = format!("{e:#}");
             }
-        }
-    });
-
-    let deadline = Instant::now() + Duration::from_secs(15);
-    loop {
-        match rx.recv_timeout(Duration::from_millis(100)) {
-            Ok(()) => break,
-            Err(mpsc::RecvTimeoutError::Timeout) => {}
-            Err(mpsc::RecvTimeoutError::Disconnected) => {
-                let _ = ff.kill();
-                bail!("ffmpeg lieferte keine Bilder: {}", log_tail(&log_path));
-            }
-        }
-        if stop.load(Ordering::SeqCst) {
-            let _ = ff.kill();
-            bail!("Abgebrochen");
-        }
-        if Instant::now() > deadline {
-            let _ = ff.kill();
-            bail!("Zeitüberschreitung beim Start: {}", log_tail(&log_path));
         }
     }
+    let Some((mut ff, used)) = started else {
+        bail!(
+            "Aufnahme konnte nicht gestartet werden (versucht: {}). Letzter Fehler: {}",
+            tried.join(", "),
+            last_err
+        );
+    };
+    *info.lock().unwrap() = used.label();
 
     let now = Instant::now();
     for (stream, st, _) in &audio {
@@ -438,7 +439,7 @@ fn run(s: &Settings, stop: &AtomicBool, state: &Mutex<RecState>, ctx: &eframe::e
         n => {
             let inputs: String = (1..=n).map(|i| format!("[{i}:a]")).collect();
             let filter = format!("{inputs}amix=inputs={n}:normalize=0:duration=longest[a]");
-            cmd.args(["-filter_complex", &filter, "-map", "0:v", "-map", "[a]"]);
+            cmd.args(["-filter_complex", filter.as_str(), "-map", "0:v", "-map", "[a]"]);
             cmd.args(["-c:v", "copy", "-c:a", "aac", "-b:a", "192k", "-shortest"]);
         }
     }

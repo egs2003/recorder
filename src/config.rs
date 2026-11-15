@@ -51,6 +51,8 @@ pub struct Settings {
     #[serde(skip)]
     pub audio_initialized: bool,
     pub minimize: bool,
+    /// GPU-Aufnahme (ddagrab) und Hardware-Encoder (NVENC/QSV/AMF) nutzen, soweit verfügbar
+    pub hw_accel: bool,
 }
 
 impl Default for Settings {
@@ -65,6 +67,7 @@ impl Default for Settings {
             audio: Vec::new(),
             audio_initialized: false,
             minimize: true,
+            hw_accel: true,
         }
     }
 }

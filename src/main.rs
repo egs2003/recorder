@@ -3,6 +3,7 @@
 mod config;
 mod ffmpeg;
 mod indicator;
+mod plan;
 mod rec;
 mod winapi;
 
@@ -364,6 +365,7 @@ impl eframe::App for App {
         }
 
         let st = self.rec.as_ref().map(|h| h.state.lock().unwrap().clone());
+        let rec_info = self.rec.as_ref().map(|h| h.info.lock().unwrap().clone()).unwrap_or_default();
         let active = matches!(st, Some(RecState::Starting) | Some(RecState::Recording(_)) | Some(RecState::Saving));
         if active {
             ctx.request_repaint_after(Duration::from_millis(250));
@@ -421,6 +423,9 @@ impl eframe::App for App {
                                 let on = (ctx.input(|i| i.time) * 1.6) as i64 % 2 == 0;
                                 dot(ui, if on { RED } else { Color32::from_rgb(120, 40, 40) });
                                 ui.label("Aufnahme läuft");
+                                if !rec_info.is_empty() {
+                                    ui.label(RichText::new(format!("({rec_info})")).size(12.5).color(MUTED));
+                                }
                             }
                             Some(RecState::Starting) | Some(RecState::Saving) => {
                                 dot(ui, AMBER);
@@ -630,6 +635,17 @@ impl eframe::App for App {
                                     });
                             });
                             ui.checkbox(&mut self.s.minimize, "Fenster beim Start minimieren");
+                            ui.checkbox(&mut self.s.hw_accel, "Hardwarebeschleunigung nutzen");
+                            let hint = match ffmpeg::caps_if_ready() {
+                                Some(c) => c.summary(),
+                                None => "Hardware wird geprüft ...".to_string(),
+                            };
+                            ui.label(RichText::new(hint).size(12.5).color(MUTED));
+                            ui.label(
+                                RichText::new("GPU-Aufnahme (ddagrab) wird nur bei genau einem angeschlossenen Monitor verwendet, sonst GDI-Aufnahme mit Hardware-Encoder.")
+                                    .size(12.5)
+                                    .color(MUTED),
+                            );
                         });
                     });
 
