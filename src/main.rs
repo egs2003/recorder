@@ -13,6 +13,7 @@ use eframe::egui::{self, Color32, RichText};
 use ffmpeg::FfState;
 use rec::RecState;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering as AtomicOrdering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -22,20 +23,80 @@ const REPO_URL: &str = "https://github.com/egs2003/recorder";
 const SMALL: [f32; 2] = [600.0, 800.0];
 const BIG: [f32; 2] = [1150.0, 780.0];
 
-// Farben
-const BG: Color32 = Color32::from_rgb(20, 22, 27);
-const CARD: Color32 = Color32::from_rgb(30, 33, 40);
-const BORDER: Color32 = Color32::from_rgb(46, 50, 60);
-const WIDGET: Color32 = Color32::from_rgb(41, 45, 55);
-const WIDGET_HOVER: Color32 = Color32::from_rgb(52, 57, 70);
-const ACCENT: Color32 = Color32::from_rgb(86, 132, 255);
-const RED: Color32 = Color32::from_rgb(232, 64, 64);
-const GREEN: Color32 = Color32::from_rgb(70, 190, 120);
-const AMBER: Color32 = Color32::from_rgb(235, 170, 50);
-const MUTED: Color32 = Color32::from_rgb(140, 147, 163);
-const INFO_BG: Color32 = Color32::from_rgb(26, 35, 64);
-const INFO_TEXT: Color32 = Color32::from_rgb(169, 184, 230);
-const ERR_BG: Color32 = Color32::from_rgb(52, 26, 30);
+// Farben: je nach Systemdesign (dunkel/hell). `pal()` liefert die Palette des aktuellen Themes,
+// `update` setzt sie zu Beginn jedes Frames anhand von `ctx.theme()`.
+#[derive(Clone, Copy)]
+struct Pal {
+    bg: Color32,
+    card: Color32,
+    border: Color32,
+    widget: Color32,
+    widget_hover: Color32,
+    accent: Color32,
+    /// Hintergrund für ausgewählte Elemente (Segmente, Textmarkierung)
+    sel_bg: Color32,
+    red: Color32,
+    green: Color32,
+    amber: Color32,
+    muted: Color32,
+    info_bg: Color32,
+    info_text: Color32,
+    err_bg: Color32,
+    err_text: Color32,
+    /// "Aus"-Phase des blinkenden Aufnahmepunkts
+    rec_dim: Color32,
+    input_bg: Color32,
+}
+
+const DARK: Pal = Pal {
+    bg: Color32::from_rgb(20, 22, 27),
+    card: Color32::from_rgb(30, 33, 40),
+    border: Color32::from_rgb(46, 50, 60),
+    widget: Color32::from_rgb(41, 45, 55),
+    widget_hover: Color32::from_rgb(52, 57, 70),
+    accent: Color32::from_rgb(86, 132, 255),
+    sel_bg: Color32::from_rgb(86, 132, 255),
+    red: Color32::from_rgb(232, 64, 64),
+    green: Color32::from_rgb(70, 190, 120),
+    amber: Color32::from_rgb(235, 170, 50),
+    muted: Color32::from_rgb(140, 147, 163),
+    info_bg: Color32::from_rgb(26, 35, 64),
+    info_text: Color32::from_rgb(169, 184, 230),
+    err_bg: Color32::from_rgb(52, 26, 30),
+    err_text: Color32::from_rgb(240, 170, 170),
+    rec_dim: Color32::from_rgb(120, 40, 40),
+    input_bg: Color32::from_rgb(24, 26, 32),
+};
+
+const LIGHT: Pal = Pal {
+    bg: Color32::from_rgb(243, 244, 247),
+    card: Color32::from_rgb(255, 255, 255),
+    border: Color32::from_rgb(218, 222, 230),
+    widget: Color32::from_rgb(234, 237, 243),
+    widget_hover: Color32::from_rgb(222, 227, 237),
+    accent: Color32::from_rgb(55, 100, 235),
+    sel_bg: Color32::from_rgb(205, 220, 255),
+    red: Color32::from_rgb(214, 48, 48),
+    green: Color32::from_rgb(34, 158, 90),
+    amber: Color32::from_rgb(214, 140, 20),
+    muted: Color32::from_rgb(98, 106, 123),
+    info_bg: Color32::from_rgb(228, 237, 255),
+    info_text: Color32::from_rgb(45, 68, 130),
+    err_bg: Color32::from_rgb(253, 232, 232),
+    err_text: Color32::from_rgb(170, 35, 35),
+    rec_dim: Color32::from_rgb(240, 160, 160),
+    input_bg: Color32::from_rgb(250, 251, 253),
+};
+
+static IS_LIGHT: AtomicBool = AtomicBool::new(false);
+
+fn pal() -> Pal {
+    if IS_LIGHT.load(AtomicOrdering::Relaxed) {
+        LIGHT
+    } else {
+        DARK
+    }
+}
 
 type Shot = Result<(usize, usize, Vec<u8>), String>;
 
@@ -78,9 +139,16 @@ fn list_audio() -> Vec<(SourceId, String)> {
     v
 }
 
+/// Folgt der Systemeinstellung (dunkel/hell) und legt für beide Themes einen eigenen Style an.
 fn setup_style(ctx: &egui::Context) {
+    ctx.set_theme(egui::ThemePreference::System);
+    ctx.set_style_of(egui::Theme::Dark, build_style(&DARK, false));
+    ctx.set_style_of(egui::Theme::Light, build_style(&LIGHT, true));
+}
+
+fn build_style(p: &Pal, light: bool) -> egui::Style {
     use egui::{FontFamily, FontId, Rounding, Stroke, TextStyle};
-    let mut style = (*ctx.style()).clone();
+    let mut style = egui::Style::default();
     style.text_styles.insert(TextStyle::Heading, FontId::new(24.0, FontFamily::Proportional));
     style.text_styles.insert(TextStyle::Body, FontId::new(15.0, FontFamily::Proportional));
     style.text_styles.insert(TextStyle::Button, FontId::new(15.0, FontFamily::Proportional));
@@ -89,43 +157,47 @@ fn setup_style(ctx: &egui::Context) {
     style.spacing.button_padding = egui::vec2(12.0, 6.0);
     style.spacing.interact_size.y = 26.0;
 
-    let mut v = egui::Visuals::dark();
-    v.panel_fill = BG;
-    v.window_fill = CARD;
-    v.extreme_bg_color = Color32::from_rgb(24, 26, 32);
-    v.selection.bg_fill = ACCENT;
-    v.selection.stroke = Stroke::new(1.0, ACCENT);
-    v.hyperlink_color = ACCENT;
+    let mut v = if light { egui::Visuals::light() } else { egui::Visuals::dark() };
+    v.panel_fill = p.bg;
+    v.window_fill = p.card;
+    v.extreme_bg_color = p.input_bg;
+    v.selection.bg_fill = p.sel_bg;
+    v.selection.stroke = Stroke::new(1.0, p.accent);
+    v.hyperlink_color = p.accent;
     let r = Rounding::same(9.0);
     v.widgets.noninteractive.rounding = r;
-    v.widgets.noninteractive.bg_stroke = Stroke::new(1.0, BORDER);
+    v.widgets.noninteractive.bg_stroke = Stroke::new(1.0, p.border);
     v.widgets.inactive.rounding = r;
-    v.widgets.inactive.weak_bg_fill = WIDGET;
-    v.widgets.inactive.bg_fill = WIDGET;
-    v.widgets.inactive.bg_stroke = Stroke::new(1.0, BORDER);
+    v.widgets.inactive.weak_bg_fill = p.widget;
+    v.widgets.inactive.bg_fill = p.widget;
+    v.widgets.inactive.bg_stroke = Stroke::new(1.0, p.border);
     v.widgets.hovered.rounding = r;
-    v.widgets.hovered.weak_bg_fill = WIDGET_HOVER;
-    v.widgets.hovered.bg_fill = WIDGET_HOVER;
-    v.widgets.hovered.bg_stroke = Stroke::new(1.0, ACCENT);
+    v.widgets.hovered.weak_bg_fill = p.widget_hover;
+    v.widgets.hovered.bg_fill = p.widget_hover;
+    v.widgets.hovered.bg_stroke = Stroke::new(1.0, p.accent);
     v.widgets.active.rounding = r;
-    v.widgets.active.weak_bg_fill = ACCENT;
-    v.widgets.active.bg_fill = ACCENT;
+    v.widgets.active.weak_bg_fill = p.accent;
+    v.widgets.active.bg_fill = p.accent;
+    if light {
+        // gedrückte Schaltfläche (blauer Hintergrund): weiße Schrift statt dunkler
+        v.widgets.active.fg_stroke = Stroke::new(2.0, Color32::WHITE);
+    }
     v.widgets.open.rounding = r;
-    v.widgets.open.weak_bg_fill = WIDGET_HOVER;
-    v.widgets.open.bg_fill = WIDGET_HOVER;
+    v.widgets.open.weak_bg_fill = p.widget_hover;
+    v.widgets.open.bg_fill = p.widget_hover;
     style.visuals = v;
-    ctx.set_style(style);
+    style
 }
 
 fn card(ui: &mut egui::Ui, title: &str, add: impl FnOnce(&mut egui::Ui)) {
     egui::Frame::none()
-        .fill(CARD)
-        .stroke(egui::Stroke::new(1.0, BORDER))
+        .fill(pal().card)
+        .stroke(egui::Stroke::new(1.0, pal().border))
         .rounding(14.0)
         .inner_margin(egui::Margin::same(14.0))
         .show(ui, |ui| {
             ui.set_width(ui.available_width());
-            ui.label(RichText::new(title.to_uppercase()).size(12.0).color(MUTED).strong());
+            ui.label(RichText::new(title.to_uppercase()).size(12.0).color(pal().muted).strong());
             ui.add_space(2.0);
             add(ui);
         });
@@ -159,7 +231,7 @@ fn mb(b: u64) -> String {
 
 fn ffmpeg_card(ui: &mut egui::Ui, st: &FfState, retry: &mut bool) {
     let failed = matches!(st, FfState::Failed(_));
-    let (fill, accent) = if failed { (ERR_BG, RED) } else { (INFO_BG, ACCENT) };
+    let (fill, accent) = if failed { (pal().err_bg, pal().red) } else { (pal().info_bg, pal().accent) };
     egui::Frame::none()
         .fill(fill)
         .stroke(egui::Stroke::new(1.0, accent))
@@ -186,14 +258,14 @@ fn ffmpeg_card(ui: &mut egui::Ui, st: &FfState, retry: &mut bool) {
                     let title = if failed { "ffmpeg konnte nicht eingerichtet werden" } else { "ffmpeg wird eingerichtet" };
                     ui.label(RichText::new(title).size(16.0).strong());
                     if !failed {
-                        ui.label(RichText::new("Einmalig beim ersten Start. Danach ist die App bereit.").size(12.5).color(INFO_TEXT));
+                        ui.label(RichText::new("Einmalig beim ersten Start. Danach ist die App bereit.").size(12.5).color(pal().info_text));
                     }
                 });
             });
             match st {
                 FfState::Downloading { done, total } => {
                     if *total > 0 {
-                        ui.add(egui::ProgressBar::new(*done as f32 / *total as f32).desired_height(10.0).fill(ACCENT));
+                        ui.add(egui::ProgressBar::new(*done as f32 / *total as f32).desired_height(10.0).fill(pal().accent));
                         ui.horizontal(|ui| {
                             ui.label(RichText::new(format!("{} von {}", mb(*done), mb(*total))).size(13.0));
                             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
@@ -201,16 +273,16 @@ fn ffmpeg_card(ui: &mut egui::Ui, st: &FfState, retry: &mut bool) {
                             });
                         });
                     } else {
-                        ui.add(egui::ProgressBar::new(0.0).desired_height(10.0).fill(ACCENT).animate(true));
+                        ui.add(egui::ProgressBar::new(0.0).desired_height(10.0).fill(pal().accent).animate(true));
                         ui.label(RichText::new(format!("{} heruntergeladen", mb(*done))).size(13.0));
                     }
                 }
                 FfState::Extracting => {
-                    ui.add(egui::ProgressBar::new(1.0).desired_height(10.0).fill(ACCENT).animate(true));
+                    ui.add(egui::ProgressBar::new(1.0).desired_height(10.0).fill(pal().accent).animate(true));
                     ui.label(RichText::new("Wird entpackt ...").size(13.0));
                 }
                 FfState::Failed(e) => {
-                    ui.label(RichText::new(e).size(13.0).color(Color32::from_rgb(240, 170, 170)));
+                    ui.label(RichText::new(e).size(13.0).color(pal().err_text));
                     if ui.button("Erneut versuchen").clicked() {
                         *retry = true;
                     }
@@ -218,7 +290,7 @@ fn ffmpeg_card(ui: &mut egui::Ui, st: &FfState, retry: &mut bool) {
                 _ => {}
             }
             ui.horizontal(|ui| {
-                ui.label(RichText::new("Aufnahme und Einstellungen sind bis zum Abschluss gesperrt.").size(12.5).color(if failed { Color32::from_rgb(240, 170, 170) } else { INFO_TEXT }));
+                ui.label(RichText::new("Aufnahme und Einstellungen sind bis zum Abschluss gesperrt.").size(12.5).color(if failed { pal().err_text } else { pal().info_text }));
             });
         });
 }
@@ -270,11 +342,11 @@ impl App {
         let mut cancel = false;
         let mut sel = (None, None);
         egui::CentralPanel::default()
-            .frame(egui::Frame::none().fill(BG).inner_margin(egui::Margin::same(16.0)))
+            .frame(egui::Frame::none().fill(pal().bg).inner_margin(egui::Margin::same(16.0)))
             .show(ctx, |ui| {
                 let p = self.picker.as_mut().unwrap();
                 ui.label(RichText::new("Bereich auswählen").size(20.0).strong());
-                ui.label(RichText::new("Mit gedrückter Maustaste einen Bereich aufziehen.").color(MUTED));
+                ui.label(RichText::new("Mit gedrückter Maustaste einen Bereich aufziehen.").color(pal().muted));
                 let tsize = p.tex.size_vec2();
                 let avail = ui.available_size() - egui::vec2(0.0, 60.0);
                 let scale = (avail.x / tsize.x).min(avail.y / tsize.y).max(0.05);
@@ -308,11 +380,11 @@ impl App {
                     };
                     let sr = egui::Rect::from_two_pos(denorm(a), denorm(b));
                     painter.rect_filled(sr, 0.0, Color32::from_rgba_unmultiplied(86, 132, 255, 50));
-                    painter.rect_stroke(sr, 0.0, egui::Stroke::new(2.0, ACCENT));
+                    painter.rect_stroke(sr, 0.0, egui::Stroke::new(2.0, pal().accent));
                 }
                 ui.horizontal(|ui| {
                     let ok = matches!((p.a, p.b), (Some(a), Some(b)) if (a.x - b.x).abs() > 0.005 && (a.y - b.y).abs() > 0.005);
-                    let btn = egui::Button::new(RichText::new("Übernehmen").strong().color(Color32::WHITE)).fill(ACCENT);
+                    let btn = egui::Button::new(RichText::new("Übernehmen").strong().color(Color32::WHITE)).fill(pal().accent);
                     if ui.add_enabled(ok, btn).clicked() {
                         confirm = true;
                     }
@@ -341,6 +413,9 @@ impl App {
 
 impl eframe::App for App {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        // Palette des aktuellen Systemdesigns (dunkel/hell) für diesen Frame
+        IS_LIGHT.store(ctx.theme() == egui::Theme::Light, AtomicOrdering::Relaxed);
+
         // Screenshot für die Bereichsauswahl abholen
         if self.shot_pending {
             let res = self.shot.lock().unwrap().take();
@@ -383,32 +458,34 @@ impl eframe::App for App {
         let mut open_path: Option<(PathBuf, bool)> = None;
 
         egui::TopBottomPanel::bottom("bottom")
-            .frame(egui::Frame::none().fill(BG).inner_margin(egui::Margin::symmetric(20.0, 12.0)))
+            .frame(egui::Frame::none().fill(pal().bg).inner_margin(egui::Margin::symmetric(20.0, 12.0)))
             .show(ctx, |ui| {
                     let w = ui.available_width();
                     let big = |text: String, fill: Color32| {
-                        egui::Button::new(RichText::new(text).size(18.0).strong().color(Color32::WHITE))
+                        // auf dem neutralen (deaktivierten) Hintergrund keine weiße Schrift, sonst im hellen Design unlesbar
+                        let txt = if fill == pal().widget { pal().muted } else { Color32::WHITE };
+                        egui::Button::new(RichText::new(text).size(18.0).strong().color(txt))
                             .fill(fill)
                             .rounding(12.0)
                             .min_size(egui::vec2(w, 52.0))
                     };
                     match &st {
                         Some(RecState::Starting) => {
-                            ui.add_enabled(false, big("Starte ...".into(), AMBER));
+                            ui.add_enabled(false, big("Starte ...".into(), pal().amber));
                         }
                         Some(RecState::Saving) => {
-                            ui.add_enabled(false, big("Speichere ...".into(), AMBER));
+                            ui.add_enabled(false, big("Speichere ...".into(), pal().amber));
                         }
                         Some(RecState::Recording(t)) => {
                             let secs = t.elapsed().as_secs();
                             let label = format!("Aufnahme beenden    {:02}:{:02}", secs / 60, secs % 60);
-                            if ui.add(big(label, RED)).clicked() {
+                            if ui.add(big(label, pal().red)).clicked() {
                                 stop = true;
                             }
                         }
                         _ => {
                             if ui
-                                .add_enabled(ff_ready, big("Aufnahme starten".into(), if ff_ready { RED } else { WIDGET }))
+                                .add_enabled(ff_ready, big("Aufnahme starten".into(), if ff_ready { pal().red } else { pal().widget }))
                                 .clicked()
                             {
                                 start = true;
@@ -421,32 +498,32 @@ impl eframe::App for App {
                         match &st {
                             Some(RecState::Recording(_)) => {
                                 let on = (ctx.input(|i| i.time) * 1.6) as i64 % 2 == 0;
-                                dot(ui, if on { RED } else { Color32::from_rgb(120, 40, 40) });
+                                dot(ui, if on { pal().red } else { pal().rec_dim });
                                 ui.label("Aufnahme läuft");
                                 if !rec_info.is_empty() {
-                                    ui.label(RichText::new(format!("({rec_info})")).size(12.5).color(MUTED));
+                                    ui.label(RichText::new(format!("({rec_info})")).size(12.5).color(pal().muted));
                                 }
                             }
                             Some(RecState::Starting) | Some(RecState::Saving) => {
-                                dot(ui, AMBER);
+                                dot(ui, pal().amber);
                                 ui.label("Bitte warten ...");
                             }
                             Some(RecState::Done(_)) => {
-                                dot(ui, GREEN);
+                                dot(ui, pal().green);
                                 ui.label("Aufnahme gespeichert");
                             }
                             Some(RecState::Failed(_)) => {
-                                dot(ui, RED);
+                                dot(ui, pal().red);
                                 ui.label("Fehler");
                             }
                             None => {
-                                dot(ui, if ff_ready { GREEN } else { MUTED });
-                                ui.label(RichText::new(if ff_ready { "Bereit" } else { "Warte auf ffmpeg" }).color(MUTED));
+                                dot(ui, if ff_ready { pal().green } else { pal().muted });
+                                ui.label(RichText::new(if ff_ready { "Bereit" } else { "Warte auf ffmpeg" }).color(pal().muted));
                             }
                         }
                     });
                     if let Some(RecState::Done(p)) = &st {
-                        ui.label(RichText::new(p.display().to_string()).size(12.5).color(MUTED));
+                        ui.label(RichText::new(p.display().to_string()).size(12.5).color(pal().muted));
                         ui.horizontal(|ui| {
                             if ui.button("Datei anzeigen").clicked() {
                                 open_path = Some((p.clone(), true));
@@ -457,27 +534,27 @@ impl eframe::App for App {
                         });
                     }
                     if let Some(RecState::Failed(e)) = &st {
-                        ui.colored_label(RED, e);
+                        ui.colored_label(pal().red, e);
                     }
                     if !self.msg.is_empty() {
-                        ui.colored_label(RED, &self.msg);
+                        ui.colored_label(pal().red, &self.msg);
                     }
             });
 
         egui::CentralPanel::default()
-            .frame(egui::Frame::none().fill(BG).inner_margin(egui::Margin::symmetric(20.0, 14.0)))
+            .frame(egui::Frame::none().fill(pal().bg).inner_margin(egui::Margin::symmetric(20.0, 14.0)))
             .show(ctx, |ui| {
                 egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
                     ui.horizontal(|ui| {
                         ui.vertical(|ui| {
                             ui.label(RichText::new(APP_TITLE).size(26.0).strong());
-                            ui.label(RichText::new("Bildschirm und Ton aufnehmen").color(MUTED));
+                            ui.label(RichText::new("Bildschirm und Ton aufnehmen").color(pal().muted));
                         });
                         ui.with_layout(egui::Layout::right_to_left(egui::Align::TOP), |ui| {
                             let chip = ui
                                 .add(
-                                    egui::Button::new(RichText::new(format!("GitHub  v{VERSION}")).size(12.5).color(MUTED))
-                                        .fill(CARD)
+                                    egui::Button::new(RichText::new(format!("GitHub  v{VERSION}")).size(12.5).color(pal().muted))
+                                        .fill(pal().card)
                                         .rounding(999.0),
                                 )
                                 .on_hover_cursor(egui::CursorIcon::PointingHand)
@@ -508,7 +585,7 @@ impl eframe::App for App {
                             );
                             match self.s.mode {
                                 Mode::Desktop => {
-                                    ui.label(RichText::new("Alle Monitore zusammen.").color(MUTED));
+                                    ui.label(RichText::new("Alle Monitore zusammen.").color(pal().muted));
                                 }
                                 Mode::Monitor => {
                                     let label = self
@@ -552,7 +629,7 @@ impl eframe::App for App {
                                     ui.label(
                                         RichText::new("Aufgenommen wird der Bildschirmbereich des Fensters. Fenster nicht verschieben oder verdecken.")
                                             .size(12.5)
-                                            .color(MUTED),
+                                            .color(pal().muted),
                                     );
                                 }
                                 Mode::Region => {
@@ -574,7 +651,7 @@ impl eframe::App for App {
                                             grab = true;
                                         }
                                         if self.shot_pending {
-                                            ui.label(RichText::new("Screenshot wird erstellt ...").color(MUTED));
+                                            ui.label(RichText::new("Screenshot wird erstellt ...").color(pal().muted));
                                         }
                                     });
                                 }
@@ -599,7 +676,7 @@ impl eframe::App for App {
                                 if ui.small_button("Liste aktualisieren").clicked() {
                                     refresh_audio = true;
                                 }
-                                ui.label(RichText::new("Mehrere Quellen werden gemischt.").size(12.5).color(MUTED));
+                                ui.label(RichText::new("Mehrere Quellen werden gemischt.").size(12.5).color(pal().muted));
                             });
                         });
 
@@ -620,7 +697,7 @@ impl eframe::App for App {
                                     );
                                 },
                             );
-                            ui.label(RichText::new("Leer = Ordner \"videos\" neben der exe.").size(12.5).color(MUTED));
+                            ui.label(RichText::new("Leer = Ordner \"videos\" neben der exe.").size(12.5).color(pal().muted));
                         });
 
                         card(ui, "Optionen", |ui| {
@@ -640,11 +717,11 @@ impl eframe::App for App {
                                 Some(c) => c.summary(),
                                 None => "Hardware wird geprüft ...".to_string(),
                             };
-                            ui.label(RichText::new(hint).size(12.5).color(MUTED));
+                            ui.label(RichText::new(hint).size(12.5).color(pal().muted));
                             ui.label(
                                 RichText::new("GPU-Aufnahme (ddagrab) wird nur bei genau einem angeschlossenen Monitor verwendet, sonst GDI-Aufnahme mit Hardware-Encoder.")
                                     .size(12.5)
-                                    .color(MUTED),
+                                    .color(pal().muted),
                             );
                         });
                     });
