@@ -1,4 +1,5 @@
 use crate::config::{Mode, Settings, SourceId};
+use crate::ffmpeg::{supports_ddagrab, supports_qsv};
 use crate::indicator::Indicator;
 use crate::winapi;
 use anyhow::{anyhow, bail, Context, Result};
@@ -65,13 +66,30 @@ fn clamp_area(a: Area, v: Area) -> Result<Area> {
     Ok((x0, y0, w, h))
 }
 
+fn ffmpeg_input_format() -> &'static str {
+    let ff = find_ffmpeg();
+    if supports_ddagrab(&ff) {
+        "ddagrab"
+    } else {
+        "gdigrab"
+    }
+}
+
+fn ffmpeg_video_encoder() -> (&'static str, &'static str) {
+    let ff = find_ffmpeg();
+    if supports_qsv(&ff) {
+        ("h264_qsv", "veryfast")
+    } else {
+        ("libx264", "ultrafast")
+    }
+}
+
 /// Liefert die ffmpeg-Eingabeargumente und den aufgenommenen Bereich (für den roten Rahmen).
 fn input_args(s: &Settings) -> Result<(Vec<String>, Area)> {
     let mons = winapi::list_monitors();
     let virt = winapi::virtual_bounds(&mons);
-    let mut a: Vec<String> = ["-f", "gdigrab", "-framerate"].map(String::from).to_vec();
-    a.push(s.fps.to_string());
-    a.extend(["-draw_mouse", "1"].map(String::from));
+    let input = ffmpeg_input_format();
+    let mut a = vec!["-f".to_string(), input.to_string(), "-framerate".to_string(), s.fps.to_string(), "-draw_mouse".to_string(), "1".to_string()];
 
     let rect = |a: &mut Vec<String>, r: Area| {
         a.extend(["-offset_x".to_string(), r.0.to_string()]);
@@ -83,7 +101,7 @@ fn input_args(s: &Settings) -> Result<(Vec<String>, Area)> {
     let area: Area;
     match s.mode {
         Mode::Desktop => {
-            a.extend(["-i", "desktop"].map(String::from));
+            a.extend(["-i".to_string(), "desktop".to_string()]);
             area = virt;
         }
         Mode::Monitor => {
@@ -121,9 +139,10 @@ pub fn screenshot() -> Result<(usize, usize, Vec<u8>)> {
     let ff = find_ffmpeg();
     let png = std::env::temp_dir().join("rec_screenshot.png");
     let _ = std::fs::remove_file(&png);
+    let input = ffmpeg_input_format();
     let out = ffcmd(&ff)
         .args(["-y", "-hide_banner", "-loglevel", "error"])
-        .args(["-f", "gdigrab", "-draw_mouse", "0", "-framerate", "1", "-i", "desktop"])
+        .args(["-f", input, "-draw_mouse", "0", "-framerate", "1", "-i", "desktop"])
         .args(["-frames:v", "1", "-vf", "scale=1920:-1"])
         .arg(&png)
         .output()
@@ -285,6 +304,8 @@ pub fn start(s: Settings, ctx: eframe::egui::Context) -> Handle {
 
 fn run(s: &Settings, stop: &AtomicBool, state: &Mutex<RecState>, ctx: &eframe::egui::Context) -> Result<PathBuf> {
     let ffmpeg = find_ffmpeg();
+    let ffmpeg_qsv = supports_qsv(&ffmpeg);
+    let ffmpeg_ddagrab = supports_ddagrab(&ffmpeg);
     let out_dir = s.resolved_out_dir();
     std::fs::create_dir_all(&out_dir)
         .with_context(|| format!("Ausgabeordner nicht erstellbar: {}", out_dir.display()))?;
@@ -318,7 +339,14 @@ fn run(s: &Settings, stop: &AtomicBool, state: &Mutex<RecState>, ctx: &eframe::e
         .args(["-y", "-hide_banner", "-loglevel", "error", "-nostats"])
         .args(&input)
         .args(["-vf", "pad=ceil(iw/2)*2:ceil(ih/2)*2"])
-        .args(["-c:v", "libx264", "-preset", "ultrafast", "-crf", "23", "-pix_fmt", "yuv420p"])
+        .args(["-c:v", if ffmpeg_qsv { "h264_qsv" } else { "libx264" }]);
+    if ffmpeg_qsv {
+        ff.args(["-preset", "veryfast", "-q:v", "23"]);
+    } else {
+        ff.args(["-preset", "ultrafast", "-crf", "23"]);
+    }
+    let ff = ff
+        .args(["-pix_fmt", "yuv420p"])
         .args(["-progress", "pipe:1"])
         .arg(&video_tmp)
         .stdin(Stdio::piped())
