@@ -37,9 +37,8 @@ fn find_ffmpeg() -> PathBuf {
 
 pub fn ffcmd(p: &Path) -> Command {
     let mut c = Command::new(p);
-    // ffmpeg.exe ist nicht DPI-aware; so bekommt gdigrab echte Pixel-Koordinaten
     c.env("__COMPAT_LAYER", "HighDpiAware");
-    c.creation_flags(0x0800_0000); // CREATE_NO_WINDOW
+    c.creation_flags(0x0800_0000);
     c
 }
 
@@ -53,7 +52,6 @@ fn log_tail(p: &Path) -> String {
 
 type Area = (i32, i32, i32, i32);
 
-/// Schneidet den Bereich auf den virtuellen Desktop zu und macht Breite/Höhe gerade.
 fn clamp_area(a: Area, v: Area) -> Result<Area> {
     let x0 = a.0.max(v.0);
     let y0 = a.1.max(v.1);
@@ -67,29 +65,33 @@ fn clamp_area(a: Area, v: Area) -> Result<Area> {
 }
 
 fn ffmpeg_input_format() -> &'static str {
-    let ff = find_ffmpeg();
-    if supports_ddagrab(&ff) {
+    if supports_ddagrab(&find_ffmpeg()) {
         "ddagrab"
     } else {
         "gdigrab"
     }
 }
 
-fn ffmpeg_video_encoder() -> (&'static str, &'static str) {
-    let ff = find_ffmpeg();
-    if supports_qsv(&ff) {
-        ("h264_qsv", "veryfast")
+fn ffmpeg_video_encoder() -> (&'static str, &'static str, &'static str) {
+    if supports_qsv(&find_ffmpeg()) {
+        ("h264_qsv", "veryfast", "23")
     } else {
-        ("libx264", "ultrafast")
+        ("libx264", "ultrafast", "27")
     }
 }
 
-/// Liefert die ffmpeg-Eingabeargumente und den aufgenommenen Bereich (für den roten Rahmen).
 fn input_args(s: &Settings) -> Result<(Vec<String>, Area)> {
     let mons = winapi::list_monitors();
     let virt = winapi::virtual_bounds(&mons);
     let input = ffmpeg_input_format();
-    let mut a = vec!["-f".to_string(), input.to_string(), "-framerate".to_string(), s.fps.to_string(), "-draw_mouse".to_string(), "1".to_string()];
+    let mut a = vec![
+        "-f".to_string(),
+        input.to_string(),
+        "-framerate".to_string(),
+        s.fps.to_string(),
+        "-draw_mouse".to_string(),
+        "1".to_string(),
+    ];
 
     let rect = |a: &mut Vec<String>, r: Area| {
         a.extend(["-offset_x".to_string(), r.0.to_string()]);
@@ -117,8 +119,6 @@ fn input_args(s: &Settings) -> Result<(Vec<String>, Area)> {
             }
             let hwnd = winapi::find_window(&s.window_title)
                 .ok_or_else(|| anyhow!("Fenster nicht gefunden: {}", s.window_title))?;
-            // Browser & Co. liefern bei direkter Fensteraufnahme (gdigrab title=) ein schwarzes Bild.
-            // Deshalb wird der Bildschirmbereich aufgenommen, an dem das Fenster gerade liegt.
             winapi::bring_to_front(hwnd);
             thread::sleep(Duration::from_millis(500));
             let r = winapi::window_rect(hwnd).ok_or_else(|| anyhow!("Fensterposition nicht ermittelbar"))?;
@@ -134,7 +134,6 @@ fn input_args(s: &Settings) -> Result<(Vec<String>, Area)> {
     Ok((a, area))
 }
 
-/// Einzelbild des gesamten Desktops (für die Bereichsauswahl).
 pub fn screenshot() -> Result<(usize, usize, Vec<u8>)> {
     let ff = find_ffmpeg();
     let png = std::env::temp_dir().join("rec_screenshot.png");
@@ -169,8 +168,6 @@ struct AudioState {
 }
 
 impl AudioState {
-    /// WASAPI-Loopback liefert bei Stille keine Daten. Lücken werden anhand der
-    /// Uhr mit Stille aufgefüllt, damit Audio und Video synchron bleiben.
     fn push(&mut self, data: &[f32]) {
         let ch = self.channels.max(1) as u64;
         let incoming = data.len() as u64 / ch;
@@ -304,8 +301,7 @@ pub fn start(s: Settings, ctx: eframe::egui::Context) -> Handle {
 
 fn run(s: &Settings, stop: &AtomicBool, state: &Mutex<RecState>, ctx: &eframe::egui::Context) -> Result<PathBuf> {
     let ffmpeg = find_ffmpeg();
-    let ffmpeg_qsv = supports_qsv(&ffmpeg);
-    let ffmpeg_ddagrab = supports_ddagrab(&ffmpeg);
+    let (video_codec, preset, crf) = ffmpeg_video_encoder();
     let out_dir = s.resolved_out_dir();
     std::fs::create_dir_all(&out_dir)
         .with_context(|| format!("Ausgabeordner nicht erstellbar: {}", out_dir.display()))?;
@@ -315,7 +311,6 @@ fn run(s: &Settings, stop: &AtomicBool, state: &Mutex<RecState>, ctx: &eframe::e
     let video_tmp = tmp.join(format!("rec_{stamp}_video.mp4"));
     let log_path = tmp.join(format!("rec_{stamp}_ffmpeg.log"));
 
-    // Audio vorbereiten (Streams laufen erst nach play())
     let host = cpal::default_host();
     let mut audio: Vec<(Stream, Arc<Mutex<AudioState>>, PathBuf)> = Vec::new();
     for (i, id) in s.audio.iter().enumerate() {
@@ -330,24 +325,23 @@ fn run(s: &Settings, stop: &AtomicBool, state: &Mutex<RecState>, ctx: &eframe::e
     }
 
     let (input, area) = input_args(s)?;
-    // Roter Rahmen, der nicht mit aufgenommen wird
     let indicator = Indicator::show(area.0, area.1, area.2, area.3);
 
-    // Video starten
     let log = File::create(&log_path)?;
     let mut ff = ffcmd(&ffmpeg)
         .args(["-y", "-hide_banner", "-loglevel", "error", "-nostats"])
         .args(&input)
         .args(["-vf", "pad=ceil(iw/2)*2:ceil(ih/2)*2"])
-        .args(["-c:v", if ffmpeg_qsv { "h264_qsv" } else { "libx264" }]);
-    if ffmpeg_qsv {
-        ff.args(["-preset", "veryfast", "-q:v", "23"]);
+        .args(["-c:v", video_codec, "-preset", preset]);
+
+    if supports_qsv(&ffmpeg) {
+        ff.args(["-q:v", crf]);
     } else {
-        ff.args(["-preset", "ultrafast", "-crf", "23"]);
+        ff.args(["-crf", crf]);
     }
+
     let ff = ff
-        .args(["-pix_fmt", "yuv420p"])
-        .args(["-progress", "pipe:1"])
+        .args(["-pix_fmt", "yuv420p", "-progress", "pipe:1"])
         .arg(&video_tmp)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -355,7 +349,6 @@ fn run(s: &Settings, stop: &AtomicBool, state: &Mutex<RecState>, ctx: &eframe::e
         .spawn()
         .context("ffmpeg.exe konnte nicht gestartet werden (muss neben recorder.exe liegen)")?;
 
-    // Auf das erste Videobild warten, damit Audio und Video gleichzeitig beginnen
     let stdout = ff.stdout.take().unwrap();
     let (tx, rx) = mpsc::channel::<()>();
     thread::spawn(move || {
@@ -405,7 +398,6 @@ fn run(s: &Settings, stop: &AtomicBool, state: &Mutex<RecState>, ctx: &eframe::e
         }
     }
 
-    // Stoppen
     *state.lock().unwrap() = RecState::Saving;
     drop(indicator);
     let mut audio_files = Vec::new();
@@ -420,7 +412,6 @@ fn run(s: &Settings, stop: &AtomicBool, state: &Mutex<RecState>, ctx: &eframe::e
     }
     ff.wait()?;
 
-    // Zusammenführen
     let mut cmd = ffcmd(&ffmpeg);
     cmd.args(["-y", "-hide_banner", "-loglevel", "error", "-i"]).arg(&video_tmp);
     for a in &audio_files {
