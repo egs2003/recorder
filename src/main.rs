@@ -526,19 +526,24 @@ impl eframe::App for App {
                                     } else {
                                         self.s.window_title.clone()
                                     };
-                                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                                        if ui.button("Aktualisieren").clicked() {
-                                            refresh_win = true;
-                                        }
-                                        egui::ComboBox::new("win", "")
-                                            .selected_text(label)
-                                            .width((ui.available_width() - 24.0).max(80.0))
-                                            .show_ui(ui, |ui| {
-                                                for t in &self.windows {
-                                                    ui.selectable_value(&mut self.s.window_title, t.clone(), t);
-                                                }
-                                            });
-                                    });
+                                    let row_width = ui.available_width();
+                                    ui.allocate_ui_with_layout(
+                                        egui::vec2(row_width, 30.0),
+                                        egui::Layout::right_to_left(egui::Align::Center),
+                                        |ui| {
+                                            if ui.button("Aktualisieren").clicked() {
+                                                refresh_win = true;
+                                            }
+                                            egui::ComboBox::new("win", "")
+                                                .selected_text(label)
+                                                .width((ui.available_width() - 24.0).max(80.0))
+                                                .show_ui(ui, |ui| {
+                                                    for t in &self.windows {
+                                                        ui.selectable_value(&mut self.s.window_title, t.clone(), t);
+                                                    }
+                                                });
+                                        },
+                                    );
                                     ui.label(
                                         RichText::new("Aufgenommen wird der Bildschirmbereich des Fensters. Fenster nicht verschieben oder verdecken.")
                                             .size(12.5)
