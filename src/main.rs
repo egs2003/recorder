@@ -162,19 +162,19 @@ fn build_style(p: &Pal, light: bool) -> egui::Style {
     v.window_fill = p.card;
     v.extreme_bg_color = p.input_bg;
     v.selection.bg_fill = p.sel_bg;
-    v.selection.stroke = Stroke::new(1.0, p.accent);
+    v.selection.stroke = Stroke::new(1.0_f32, p.accent);
     v.hyperlink_color = p.accent;
     let r = Rounding::same(9.0);
     v.widgets.noninteractive.rounding = r;
-    v.widgets.noninteractive.bg_stroke = Stroke::new(1.0, p.border);
+    v.widgets.noninteractive.bg_stroke = Stroke::new(1.0_f32, p.border);
     v.widgets.inactive.rounding = r;
     v.widgets.inactive.weak_bg_fill = p.widget;
     v.widgets.inactive.bg_fill = p.widget;
-    v.widgets.inactive.bg_stroke = Stroke::new(1.0, p.border);
+    v.widgets.inactive.bg_stroke = Stroke::new(1.0_f32, p.border);
     v.widgets.hovered.rounding = r;
     v.widgets.hovered.weak_bg_fill = p.widget_hover;
     v.widgets.hovered.bg_fill = p.widget_hover;
-    v.widgets.hovered.bg_stroke = Stroke::new(1.0, p.accent);
+    v.widgets.hovered.bg_stroke = Stroke::new(1.0_f32, p.accent);
     v.widgets.active.rounding = r;
     // Achtung: `RichText::strong()` nimmt die Farbe von widgets.active.fg_stroke. Diese Schriftfarbe
     // deshalb nie ändern (hell: dunkel, dunkel: hell), sondern den Hintergrund anpassen: im hellen
@@ -192,7 +192,7 @@ fn build_style(p: &Pal, light: bool) -> egui::Style {
 fn card(ui: &mut egui::Ui, title: &str, add: impl FnOnce(&mut egui::Ui)) {
     egui::Frame::none()
         .fill(pal().card)
-        .stroke(egui::Stroke::new(1.0, pal().border))
+        .stroke(egui::Stroke::new(1.0_f32, pal().border))
         .rounding(14.0)
         .inner_margin(egui::Margin::same(14.0))
         .show(ui, |ui| {
@@ -234,7 +234,7 @@ fn ffmpeg_card(ui: &mut egui::Ui, st: &FfState, retry: &mut bool) {
     let (fill, accent) = if failed { (pal().err_bg, pal().red) } else { (pal().info_bg, pal().accent) };
     egui::Frame::none()
         .fill(fill)
-        .stroke(egui::Stroke::new(1.0, accent))
+        .stroke(egui::Stroke::new(1.0_f32, accent))
         .rounding(14.0)
         .inner_margin(egui::Margin::same(14.0))
         .show(ui, |ui| {
@@ -248,7 +248,7 @@ fn ffmpeg_card(ui: &mut egui::Ui, st: &FfState, retry: &mut bool) {
                     if failed {
                         p.text(c, egui::Align2::CENTER_CENTER, "!", egui::FontId::proportional(20.0), Color32::WHITE);
                     } else {
-                        let s = egui::Stroke::new(2.2, Color32::WHITE);
+                        let s = egui::Stroke::new(2.2_f32, Color32::WHITE);
                         p.line_segment([c + egui::vec2(0.0, -8.0), c + egui::vec2(0.0, 6.0)], s);
                         p.line_segment([c + egui::vec2(-5.0, 1.0), c + egui::vec2(0.0, 7.0)], s);
                         p.line_segment([c + egui::vec2(5.0, 1.0), c + egui::vec2(0.0, 7.0)], s);
@@ -380,7 +380,7 @@ impl App {
                     };
                     let sr = egui::Rect::from_two_pos(denorm(a), denorm(b));
                     painter.rect_filled(sr, 0.0, Color32::from_rgba_unmultiplied(86, 132, 255, 50));
-                    painter.rect_stroke(sr, 0.0, egui::Stroke::new(2.0, pal().accent));
+                    painter.rect_stroke(sr, 0.0, egui::Stroke::new(2.0_f32, pal().accent));
                 }
                 ui.horizontal(|ui| {
                     let ok = matches!((p.a, p.b), (Some(a), Some(b)) if (a.x - b.x).abs() > 0.005 && (a.y - b.y).abs() > 0.005);
