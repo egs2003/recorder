@@ -1,13 +1,10 @@
-# recorder
+# Bildschirm-Recorder
 
-Einfacher Bildschirm-Recorder mit Audio für Windows.
+Portabler Bildschirm-Recorder mit Audio für Windows (Rust, egui, ffmpeg).
 
-- `recorder.exe` starten, Aufnahme läuft sofort
-- Enter drücken zum Beenden
-- Ergebnis: `Videos\aufnahme_JJJJMMTT_HHMMSS.mp4`
+- Aufnahmebereich: gesamter Desktop, einzelner Monitor, einzelnes Fenster oder fester Bereich (per Maus wählbar)
+- Audioquellen: beliebige Systemton-Geräte (Loopback) und Eingänge (Mikrofon), mehrere werden gemischt
+- Speicherort: standardmäßig `videos\` neben der exe, frei wählbar
+- Einstellungen werden in `settings.json` neben der exe gespeichert
 
-Optionen:
-- `--mic`  Mikrofon statt Systemton aufnehmen
-- `--fps N` Bildrate (Standard 30)
-
-`ffmpeg.exe` muss neben `recorder.exe` liegen (ist im Build-Zip enthalten).
+`ffmpeg.exe` muss neben `recorder.exe` liegen (im Build-Artifact enthalten).
