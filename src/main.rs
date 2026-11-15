@@ -594,17 +594,22 @@ impl eframe::App for App {
                         });
 
                         card(ui, "Speicherort", |ui| {
-                            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                                if ui.button("Durchsuchen ...").clicked() {
-                                    browse = true;
-                                }
-                                ui.add_sized(
-                                    [ui.available_width(), 30.0],
-                                    egui::TextEdit::singleline(&mut self.s.out_dir)
-                                        .hint_text(config::default_out_dir().display().to_string())
-                                        .margin(egui::vec2(10.0, 6.0)),
-                                );
-                            });
+                            let row_width = ui.available_width();
+                            ui.allocate_ui_with_layout(
+                                egui::vec2(row_width, 30.0),
+                                egui::Layout::right_to_left(egui::Align::Center),
+                                |ui| {
+                                    if ui.button("Durchsuchen ...").clicked() {
+                                        browse = true;
+                                    }
+                                    ui.add_sized(
+                                        [ui.available_width(), 30.0],
+                                        egui::TextEdit::singleline(&mut self.s.out_dir)
+                                            .hint_text(config::default_out_dir().display().to_string())
+                                            .margin(egui::vec2(10.0, 6.0)),
+                                    );
+                                },
+                            );
                             ui.label(RichText::new("Leer = Ordner \"videos\" neben der exe.").size(12.5).color(MUTED));
                         });
 
