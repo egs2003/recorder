@@ -1,8 +1,9 @@
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
-#[derive(Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Debug)]
+#[derive(Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Debug, Default)]
 pub enum Mode {
+    #[default]
     Desktop,
     Monitor,
     Window,
@@ -34,14 +35,20 @@ impl Default for Region {
 #[derive(Clone, Serialize, Deserialize, Debug)]
 #[serde(default)]
 pub struct Settings {
+    #[serde(skip)]
     pub mode: Mode,
+    #[serde(skip)]
     pub monitor: usize,
+    #[serde(skip)]
     pub window_title: String,
+    #[serde(skip)]
     pub region: Region,
     /// Leer = Ordner "videos" neben der exe
     pub out_dir: String,
     pub fps: u32,
+    #[serde(skip)]
     pub audio: Vec<SourceId>,
+    #[serde(skip)]
     pub audio_initialized: bool,
     pub minimize: bool,
 }
