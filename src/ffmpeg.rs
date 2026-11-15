@@ -1,6 +1,3 @@
-//! Lädt ffmpeg beim ersten Start automatisch neben die exe (portabel) und prüft,
-//! dass die Version die benötigten Funktionen hat (gdigrab, libx264, aac, amix).
-
 use crate::config::exe_dir;
 use crate::rec::ffcmd;
 use anyhow::{anyhow, bail, Context, Result};
@@ -39,6 +36,14 @@ fn run_ok(p: &Path, args: &[&str]) -> Option<String> {
     }
 }
 
+pub fn supports_ddagrab(p: &Path) -> bool {
+    run_ok(p, &["-devices"]).map(|s| s.contains("ddagrab")).unwrap_or(false)
+}
+
+pub fn supports_qsv(p: &Path) -> bool {
+    run_ok(p, &["-encoders"]).map(|s| s.contains("h264_qsv")).unwrap_or(false)
+}
+
 /// Prüft, ob die vorhandene ffmpeg.exe lauffähig ist und alles Nötige kann.
 fn is_usable(p: &Path) -> bool {
     if !p.exists() {
@@ -47,7 +52,8 @@ fn is_usable(p: &Path) -> bool {
     let has_x264 = run_ok(p, &["-encoders"]).map(|s| s.contains("libx264")).unwrap_or(false);
     let has_gdigrab = run_ok(p, &["-devices"]).map(|s| s.contains("gdigrab")).unwrap_or(false);
     let has_aac = run_ok(p, &["-encoders"]).map(|s| s.contains("aac")).unwrap_or(false);
-    has_x264 && has_gdigrab && has_aac
+    let has_ddagrab = supports_ddagrab(p);
+    has_x264 && has_gdigrab && has_aac && (has_ddagrab || true)
 }
 
 fn set(state: &Mutex<FfState>, ctx: &eframe::egui::Context, s: FfState) {
