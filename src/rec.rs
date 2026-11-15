@@ -37,8 +37,9 @@ fn find_ffmpeg() -> PathBuf {
 
 pub fn ffcmd(p: &Path) -> Command {
     let mut c = Command::new(p);
+    // ffmpeg.exe ist nicht DPI-aware; so bekommt gdigrab echte Pixel-Koordinaten
     c.env("__COMPAT_LAYER", "HighDpiAware");
-    c.creation_flags(0x0800_0000);
+    c.creation_flags(0x0800_0000); // CREATE_NO_WINDOW
     c
 }
 
@@ -52,6 +53,7 @@ fn log_tail(p: &Path) -> String {
 
 type Area = (i32, i32, i32, i32);
 
+/// Schneidet den Bereich auf den virtuellen Desktop zu und macht Breite/Höhe gerade.
 fn clamp_area(a: Area, v: Area) -> Result<Area> {
     let x0 = a.0.max(v.0);
     let y0 = a.1.max(v.1);
@@ -80,6 +82,7 @@ fn ffmpeg_video_encoder() -> (&'static str, &'static str, &'static str) {
     }
 }
 
+/// Liefert die ffmpeg-Eingabeargumente und den aufgenommenen Bereich (für den roten Rahmen).
 fn input_args(s: &Settings) -> Result<(Vec<String>, Area)> {
     let mons = winapi::list_monitors();
     let virt = winapi::virtual_bounds(&mons);
@@ -134,6 +137,7 @@ fn input_args(s: &Settings) -> Result<(Vec<String>, Area)> {
     Ok((a, area))
 }
 
+/// Einzelbild des gesamten Desktops (für die Bereichsauswahl).
 pub fn screenshot() -> Result<(usize, usize, Vec<u8>)> {
     let ff = find_ffmpeg();
     let png = std::env::temp_dir().join("rec_screenshot.png");
@@ -266,6 +270,12 @@ fn open_audio(host: &cpal::Host, id: &SourceId, wav: &Path) -> Result<(Stream, A
         bits_per_sample: 32,
         sample_format: hound::SampleFormat::Float,
     };
+    let writer = hound::WavSpec {
+        channels: cfg.channels(),
+        sample_rate: cfg.sample_rate().0,
+        bits_per_sample: 32,
+        sample_format: hound::SampleFormat::Float,
+    };
     let writer = hound::WavWriter::create(wav, spec).context("WAV-Datei anlegen")?;
     let state = Arc::new(Mutex::new(AudioState {
         writer: Some(writer),
@@ -364,6 +374,7 @@ fn run(s: &Settings, stop: &AtomicBool, state: &Mutex<RecState>, ctx: &eframe::e
             }
         }
     });
+
     let deadline = Instant::now() + Duration::from_secs(15);
     loop {
         match rx.recv_timeout(Duration::from_millis(100)) {
