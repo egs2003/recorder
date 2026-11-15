@@ -1,4 +1,4 @@
-use crate::config::{exe_dir, Mode, Settings, SourceId};
+use crate::config::{Mode, Settings, SourceId};
 use crate::indicator::Indicator;
 use crate::winapi;
 use anyhow::{anyhow, bail, Context, Result};
@@ -31,15 +31,10 @@ pub struct Handle {
 // ---------------------------------------------------------------- ffmpeg
 
 fn find_ffmpeg() -> PathBuf {
-    let p = exe_dir().join("ffmpeg.exe");
-    if p.exists() {
-        p
-    } else {
-        PathBuf::from("ffmpeg")
-    }
+    crate::ffmpeg::path()
 }
 
-fn ffcmd(p: &Path) -> Command {
+pub fn ffcmd(p: &Path) -> Command {
     let mut c = Command::new(p);
     // ffmpeg.exe ist nicht DPI-aware; so bekommt gdigrab echte Pixel-Koordinaten
     c.env("__COMPAT_LAYER", "HighDpiAware");

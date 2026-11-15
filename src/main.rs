@@ -1,21 +1,35 @@
 #![windows_subsystem = "windows"]
 
 mod config;
+mod ffmpeg;
 mod indicator;
 mod rec;
 mod winapi;
 
 use config::{Mode, Settings, SourceId};
 use cpal::traits::{DeviceTrait, HostTrait};
-use eframe::egui;
+use eframe::egui::{self, Color32, RichText};
+use ffmpeg::FfState;
 use rec::RecState;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 pub const APP_TITLE: &str = "Bildschirm-Recorder";
-const SMALL: [f32; 2] = [540.0, 760.0];
-const BIG: [f32; 2] = [1150.0, 760.0];
+const SMALL: [f32; 2] = [560.0, 820.0];
+const BIG: [f32; 2] = [1150.0, 780.0];
+
+// Farben
+const BG: Color32 = Color32::from_rgb(20, 22, 27);
+const CARD: Color32 = Color32::from_rgb(30, 33, 40);
+const BORDER: Color32 = Color32::from_rgb(46, 50, 60);
+const WIDGET: Color32 = Color32::from_rgb(41, 45, 55);
+const WIDGET_HOVER: Color32 = Color32::from_rgb(52, 57, 70);
+const ACCENT: Color32 = Color32::from_rgb(86, 132, 255);
+const RED: Color32 = Color32::from_rgb(232, 64, 64);
+const GREEN: Color32 = Color32::from_rgb(70, 190, 120);
+const AMBER: Color32 = Color32::from_rgb(235, 170, 50);
+const MUTED: Color32 = Color32::from_rgb(140, 147, 163);
 
 type Shot = Result<(usize, usize, Vec<u8>), String>;
 
@@ -31,6 +45,7 @@ struct App {
     windows: Vec<String>,
     devices: Vec<(SourceId, String)>,
     rec: Option<rec::Handle>,
+    ff: Arc<Mutex<FfState>>,
     picker: Option<Picker>,
     shot: Arc<Mutex<Option<Shot>>>,
     shot_pending: bool,
@@ -43,22 +58,101 @@ fn list_audio() -> Vec<(SourceId, String)> {
     if let Ok(it) = host.output_devices() {
         for d in it {
             if let Ok(n) = d.name() {
-                v.push((SourceId { output: true, name: n.clone() }, format!("Systemton: {n}")));
+                v.push((SourceId { output: true, name: n.clone() }, format!("Systemton  -  {n}")));
             }
         }
     }
     if let Ok(it) = host.input_devices() {
         for d in it {
             if let Ok(n) = d.name() {
-                v.push((SourceId { output: false, name: n.clone() }, format!("Eingang: {n}")));
+                v.push((SourceId { output: false, name: n.clone() }, format!("Eingang  -  {n}")));
             }
         }
     }
     v
 }
 
+fn setup_style(ctx: &egui::Context) {
+    use egui::{FontFamily, FontId, Rounding, Stroke, TextStyle};
+    let mut style = (*ctx.style()).clone();
+    style.text_styles.insert(TextStyle::Heading, FontId::new(26.0, FontFamily::Proportional));
+    style.text_styles.insert(TextStyle::Body, FontId::new(15.0, FontFamily::Proportional));
+    style.text_styles.insert(TextStyle::Button, FontId::new(15.0, FontFamily::Proportional));
+    style.text_styles.insert(TextStyle::Small, FontId::new(12.5, FontFamily::Proportional));
+    style.spacing.item_spacing = egui::vec2(10.0, 10.0);
+    style.spacing.button_padding = egui::vec2(14.0, 7.0);
+    style.spacing.interact_size.y = 30.0;
+
+    let mut v = egui::Visuals::dark();
+    v.panel_fill = BG;
+    v.window_fill = CARD;
+    v.extreme_bg_color = Color32::from_rgb(24, 26, 32);
+    v.selection.bg_fill = ACCENT;
+    v.selection.stroke = Stroke::new(1.0, Color32::WHITE);
+    v.hyperlink_color = ACCENT;
+    let r = Rounding::same(9.0);
+    v.widgets.noninteractive.rounding = r;
+    v.widgets.noninteractive.bg_stroke = Stroke::new(1.0, BORDER);
+    v.widgets.inactive.rounding = r;
+    v.widgets.inactive.weak_bg_fill = WIDGET;
+    v.widgets.inactive.bg_fill = WIDGET;
+    v.widgets.inactive.bg_stroke = Stroke::new(1.0, BORDER);
+    v.widgets.hovered.rounding = r;
+    v.widgets.hovered.weak_bg_fill = WIDGET_HOVER;
+    v.widgets.hovered.bg_fill = WIDGET_HOVER;
+    v.widgets.hovered.bg_stroke = Stroke::new(1.0, ACCENT);
+    v.widgets.active.rounding = r;
+    v.widgets.active.weak_bg_fill = ACCENT;
+    v.widgets.active.bg_fill = ACCENT;
+    v.widgets.open.rounding = r;
+    v.widgets.open.weak_bg_fill = WIDGET_HOVER;
+    v.widgets.open.bg_fill = WIDGET_HOVER;
+    style.visuals = v;
+    ctx.set_style(style);
+}
+
+fn card(ui: &mut egui::Ui, title: &str, add: impl FnOnce(&mut egui::Ui)) {
+    egui::Frame::none()
+        .fill(CARD)
+        .stroke(egui::Stroke::new(1.0, BORDER))
+        .rounding(14.0)
+        .inner_margin(egui::Margin::same(16.0))
+        .show(ui, |ui| {
+            ui.set_width(ui.available_width());
+            ui.label(RichText::new(title.to_uppercase()).size(12.0).color(MUTED).strong());
+            ui.add_space(2.0);
+            add(ui);
+        });
+}
+
+fn segmented<T: PartialEq + Copy>(ui: &mut egui::Ui, val: &mut T, items: &[(T, &str)]) {
+    let n = items.len() as f32;
+    let gap = ui.spacing().item_spacing.x;
+    let w = (ui.available_width() - gap * (n - 1.0)) / n;
+    ui.horizontal(|ui| {
+        for (v, label) in items {
+            let sel = *val == *v;
+            let btn = egui::Button::new(RichText::new(*label).size(15.0).strong())
+                .min_size(egui::vec2(w, 36.0))
+                .selected(sel);
+            if ui.add(btn).clicked() {
+                *val = *v;
+            }
+        }
+    });
+}
+
+fn dot(ui: &mut egui::Ui, color: Color32) {
+    let (r, _) = ui.allocate_exact_size(egui::vec2(12.0, 12.0), egui::Sense::hover());
+    ui.painter().circle_filled(r.center(), 5.5, color);
+}
+
+fn mb(b: u64) -> String {
+    format!("{:.0} MB", b as f64 / 1_048_576.0)
+}
+
 impl App {
-    fn new() -> Self {
+    fn new(ctx: &egui::Context) -> Self {
         let mut s = Settings::load();
         if !s.audio_initialized {
             if let Some(n) = cpal::default_host().default_output_device().and_then(|d| d.name().ok()) {
@@ -66,12 +160,15 @@ impl App {
             }
             s.audio_initialized = true;
         }
+        let ff = Arc::new(Mutex::new(FfState::Checking));
+        ffmpeg::ensure(ff.clone(), ctx.clone());
         App {
             s,
             monitors: winapi::list_monitors(),
             windows: winapi::list_windows(),
             devices: list_audio(),
             rec: None,
+            ff,
             picker: None,
             shot: Arc::new(Mutex::new(None)),
             shot_pending: false,
@@ -100,55 +197,59 @@ impl App {
         let mut confirm = false;
         let mut cancel = false;
         let mut sel = (None, None);
-        egui::CentralPanel::default().show(ctx, |ui| {
-            let p = self.picker.as_mut().unwrap();
-            ui.label("Mit gedrückter Maustaste einen Bereich aufziehen.");
-            let tsize = p.tex.size_vec2();
-            let avail = ui.available_size() - egui::vec2(0.0, 50.0);
-            let scale = (avail.x / tsize.x).min(avail.y / tsize.y).max(0.05);
-            let (resp, painter) = ui.allocate_painter(tsize * scale, egui::Sense::drag());
-            let rect = resp.rect;
-            painter.image(
-                p.tex.id(),
-                rect,
-                egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)),
-                egui::Color32::WHITE,
-            );
-            let to_norm = |pos: egui::Pos2| {
-                egui::pos2(
-                    ((pos.x - rect.min.x) / rect.width()).clamp(0.0, 1.0),
-                    ((pos.y - rect.min.y) / rect.height()).clamp(0.0, 1.0),
-                )
-            };
-            if resp.drag_started() {
-                if let Some(pos) = resp.interact_pointer_pos() {
-                    p.a = Some(to_norm(pos));
-                    p.b = p.a;
-                }
-            } else if resp.dragged() {
-                if let Some(pos) = resp.interact_pointer_pos() {
-                    p.b = Some(to_norm(pos));
-                }
-            }
-            if let (Some(a), Some(b)) = (p.a, p.b) {
-                let denorm = |n: egui::Pos2| {
-                    egui::pos2(rect.min.x + n.x * rect.width(), rect.min.y + n.y * rect.height())
+        egui::CentralPanel::default()
+            .frame(egui::Frame::none().fill(BG).inner_margin(egui::Margin::same(16.0)))
+            .show(ctx, |ui| {
+                let p = self.picker.as_mut().unwrap();
+                ui.label(RichText::new("Bereich auswählen").size(20.0).strong());
+                ui.label(RichText::new("Mit gedrückter Maustaste einen Bereich aufziehen.").color(MUTED));
+                let tsize = p.tex.size_vec2();
+                let avail = ui.available_size() - egui::vec2(0.0, 60.0);
+                let scale = (avail.x / tsize.x).min(avail.y / tsize.y).max(0.05);
+                let (resp, painter) = ui.allocate_painter(tsize * scale, egui::Sense::drag());
+                let rect = resp.rect;
+                painter.image(
+                    p.tex.id(),
+                    rect,
+                    egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)),
+                    Color32::WHITE,
+                );
+                let to_norm = |pos: egui::Pos2| {
+                    egui::pos2(
+                        ((pos.x - rect.min.x) / rect.width()).clamp(0.0, 1.0),
+                        ((pos.y - rect.min.y) / rect.height()).clamp(0.0, 1.0),
+                    )
                 };
-                let sr = egui::Rect::from_two_pos(denorm(a), denorm(b));
-                painter.rect_filled(sr, 0.0, egui::Color32::from_rgba_unmultiplied(255, 0, 0, 40));
-                painter.rect_stroke(sr, 0.0, egui::Stroke::new(2.0, egui::Color32::RED));
-            }
-            ui.horizontal(|ui| {
-                let ok = matches!((p.a, p.b), (Some(a), Some(b)) if (a.x - b.x).abs() > 0.005 && (a.y - b.y).abs() > 0.005);
-                if ui.add_enabled(ok, egui::Button::new("Übernehmen")).clicked() {
-                    confirm = true;
+                if resp.drag_started() {
+                    if let Some(pos) = resp.interact_pointer_pos() {
+                        p.a = Some(to_norm(pos));
+                        p.b = p.a;
+                    }
+                } else if resp.dragged() {
+                    if let Some(pos) = resp.interact_pointer_pos() {
+                        p.b = Some(to_norm(pos));
+                    }
                 }
-                if ui.button("Abbrechen").clicked() {
-                    cancel = true;
+                if let (Some(a), Some(b)) = (p.a, p.b) {
+                    let denorm = |n: egui::Pos2| {
+                        egui::pos2(rect.min.x + n.x * rect.width(), rect.min.y + n.y * rect.height())
+                    };
+                    let sr = egui::Rect::from_two_pos(denorm(a), denorm(b));
+                    painter.rect_filled(sr, 0.0, Color32::from_rgba_unmultiplied(86, 132, 255, 50));
+                    painter.rect_stroke(sr, 0.0, egui::Stroke::new(2.0, ACCENT));
                 }
+                ui.horizontal(|ui| {
+                    let ok = matches!((p.a, p.b), (Some(a), Some(b)) if (a.x - b.x).abs() > 0.005 && (a.y - b.y).abs() > 0.005);
+                    let btn = egui::Button::new(RichText::new("Übernehmen").strong().color(Color32::WHITE)).fill(ACCENT);
+                    if ui.add_enabled(ok, btn).clicked() {
+                        confirm = true;
+                    }
+                    if ui.button("Abbrechen").clicked() {
+                        cancel = true;
+                    }
+                });
+                sel = (p.a, p.b);
             });
-            sel = (p.a, p.b);
-        });
         if confirm {
             if let (Some(a), Some(b)) = sel {
                 let r = egui::Rect::from_two_pos(a, b);
@@ -196,6 +297,8 @@ impl eframe::App for App {
         if active {
             ctx.request_repaint_after(Duration::from_millis(250));
         }
+        let ffst = self.ff.lock().unwrap().clone();
+        let ff_ready = matches!(ffst, FfState::Ready);
 
         let mut start = false;
         let mut stop = false;
@@ -203,171 +306,258 @@ impl eframe::App for App {
         let mut browse = false;
         let mut refresh_win = false;
         let mut refresh_audio = false;
+        let mut retry_ff = false;
         let mut open_path: Option<(PathBuf, bool)> = None;
 
-        egui::CentralPanel::default().show(ctx, |ui| {
-            egui::ScrollArea::vertical().show(ui, |ui| {
-                ui.heading(APP_TITLE);
-                ui.add_space(6.0);
+        egui::CentralPanel::default()
+            .frame(egui::Frame::none().fill(BG).inner_margin(egui::Margin::symmetric(20.0, 16.0)))
+            .show(ctx, |ui| {
+                egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
+                    ui.label(RichText::new(APP_TITLE).size(26.0).strong());
+                    ui.label(RichText::new("Bildschirm und Ton aufnehmen").color(MUTED));
+                    ui.add_space(4.0);
 
-                ui.add_enabled_ui(!active, |ui| {
-                    ui.strong("Aufnahmebereich");
-                    ui.radio_value(&mut self.s.mode, Mode::Desktop, "Gesamter Desktop (alle Monitore)");
-                    ui.radio_value(&mut self.s.mode, Mode::Monitor, "Ein Monitor");
-                    if self.s.mode == Mode::Monitor {
-                        ui.horizontal(|ui| {
-                            ui.add_space(20.0);
-                            let label = self
-                                .monitors
-                                .get(self.s.monitor)
-                                .map(|m| m.label(self.s.monitor))
-                                .unwrap_or_else(|| "-".into());
-                            egui::ComboBox::new("mon", "").selected_text(label).width(340.0).show_ui(ui, |ui| {
-                                for (i, m) in self.monitors.iter().enumerate() {
-                                    ui.selectable_value(&mut self.s.monitor, i, m.label(i));
+                    // ffmpeg-Status
+                    if !ff_ready {
+                        card(ui, "ffmpeg", |ui| match &ffst {
+                            FfState::Checking => {
+                                ui.label("Prüfe ffmpeg ...");
+                            }
+                            FfState::Downloading { done, total } => {
+                                if *total > 0 {
+                                    ui.label(format!("ffmpeg wird heruntergeladen ({} von {})", mb(*done), mb(*total)));
+                                    ui.add(egui::ProgressBar::new(*done as f32 / *total as f32).show_percentage());
+                                } else {
+                                    ui.label(format!("ffmpeg wird heruntergeladen ({})", mb(*done)));
+                                    ui.add(egui::ProgressBar::new(0.0).animate(true));
                                 }
+                            }
+                            FfState::Extracting => {
+                                ui.label("ffmpeg wird entpackt ...");
+                                ui.add(egui::ProgressBar::new(1.0).animate(true));
+                            }
+                            FfState::Failed(e) => {
+                                ui.colored_label(RED, format!("ffmpeg konnte nicht bereitgestellt werden: {e}"));
+                                if ui.button("Erneut versuchen").clicked() {
+                                    retry_ff = true;
+                                }
+                            }
+                            FfState::Ready => {}
+                        });
+                    }
+
+                    ui.add_enabled_ui(!active, |ui| {
+                        card(ui, "Aufnahmebereich", |ui| {
+                            segmented(
+                                ui,
+                                &mut self.s.mode,
+                                &[
+                                    (Mode::Desktop, "Desktop"),
+                                    (Mode::Monitor, "Monitor"),
+                                    (Mode::Window, "Fenster"),
+                                    (Mode::Region, "Bereich"),
+                                ],
+                            );
+                            match self.s.mode {
+                                Mode::Desktop => {
+                                    ui.label(RichText::new("Alle Monitore zusammen.").color(MUTED));
+                                }
+                                Mode::Monitor => {
+                                    let label = self
+                                        .monitors
+                                        .get(self.s.monitor)
+                                        .map(|m| m.label(self.s.monitor))
+                                        .unwrap_or_else(|| "-".into());
+                                    egui::ComboBox::new("mon", "")
+                                        .selected_text(label)
+                                        .width(ui.available_width() - 8.0)
+                                        .show_ui(ui, |ui| {
+                                            for (i, m) in self.monitors.iter().enumerate() {
+                                                ui.selectable_value(&mut self.s.monitor, i, m.label(i));
+                                            }
+                                        });
+                                }
+                                Mode::Window => {
+                                    let label = if self.s.window_title.is_empty() {
+                                        "Fenster wählen ...".to_string()
+                                    } else {
+                                        self.s.window_title.clone()
+                                    };
+                                    ui.horizontal(|ui| {
+                                        egui::ComboBox::new("win", "")
+                                            .selected_text(label)
+                                            .width(ui.available_width() - 130.0)
+                                            .show_ui(ui, |ui| {
+                                                for t in &self.windows {
+                                                    ui.selectable_value(&mut self.s.window_title, t.clone(), t);
+                                                }
+                                            });
+                                        if ui.button("Aktualisieren").clicked() {
+                                            refresh_win = true;
+                                        }
+                                    });
+                                    ui.label(
+                                        RichText::new("Aufgenommen wird der Bildschirmbereich des Fensters. Fenster nicht verschieben oder verdecken.")
+                                            .size(12.5)
+                                            .color(MUTED),
+                                    );
+                                }
+                                Mode::Region => {
+                                    ui.horizontal_wrapped(|ui| {
+                                        ui.label("X");
+                                        ui.add(egui::DragValue::new(&mut self.s.region.x));
+                                        ui.label("Y");
+                                        ui.add(egui::DragValue::new(&mut self.s.region.y));
+                                        ui.label("Breite");
+                                        ui.add(egui::DragValue::new(&mut self.s.region.w));
+                                        ui.label("Höhe");
+                                        ui.add(egui::DragValue::new(&mut self.s.region.h));
+                                    });
+                                    ui.horizontal(|ui| {
+                                        if ui
+                                            .add_enabled(!self.shot_pending && ff_ready, egui::Button::new("Bereich per Maus wählen ..."))
+                                            .clicked()
+                                        {
+                                            grab = true;
+                                        }
+                                        if self.shot_pending {
+                                            ui.label(RichText::new("Screenshot wird erstellt ...").color(MUTED));
+                                        }
+                                    });
+                                }
+                            }
+                        });
+
+                        card(ui, "Audioquellen", |ui| {
+                            if self.devices.is_empty() {
+                                ui.label("Keine Audiogeräte gefunden.");
+                            }
+                            for (id, label) in &self.devices {
+                                let mut on = self.s.audio.contains(id);
+                                if ui.checkbox(&mut on, label).changed() {
+                                    if on {
+                                        self.s.audio.push(id.clone());
+                                    } else {
+                                        self.s.audio.retain(|x| x != id);
+                                    }
+                                }
+                            }
+                            ui.horizontal(|ui| {
+                                if ui.small_button("Liste aktualisieren").clicked() {
+                                    refresh_audio = true;
+                                }
+                                ui.label(RichText::new("Mehrere Quellen werden gemischt.").size(12.5).color(MUTED));
                             });
                         });
-                    }
-                    ui.radio_value(&mut self.s.mode, Mode::Window, "Ein Fenster");
-                    if self.s.mode == Mode::Window {
-                        ui.horizontal(|ui| {
-                            ui.add_space(20.0);
-                            let label = if self.s.window_title.is_empty() {
-                                "(Fenster wählen)".to_string()
-                            } else {
-                                self.s.window_title.clone()
-                            };
-                            egui::ComboBox::new("win", "").selected_text(label).width(340.0).show_ui(ui, |ui| {
-                                for t in &self.windows {
-                                    ui.selectable_value(&mut self.s.window_title, t.clone(), t);
+
+                        card(ui, "Speicherort", |ui| {
+                            ui.horizontal(|ui| {
+                                ui.add(
+                                    egui::TextEdit::singleline(&mut self.s.out_dir)
+                                        .hint_text(config::default_out_dir().display().to_string())
+                                        .desired_width(ui.available_width() - 130.0)
+                                        .margin(egui::vec2(10.0, 7.0)),
+                                );
+                                if ui.button("Durchsuchen ...").clicked() {
+                                    browse = true;
                                 }
                             });
-                            if ui.button("Aktualisieren").clicked() {
-                                refresh_win = true;
-                            }
+                            ui.label(RichText::new("Leer = Ordner \"videos\" neben der exe.").size(12.5).color(MUTED));
                         });
-                        ui.horizontal(|ui| {
-                            ui.add_space(20.0);
-                            ui.weak("Wird als Bildschirmbereich aufgenommen: Fenster nicht verschieben oder verdecken.");
-                        });
-                    }
-                    ui.radio_value(&mut self.s.mode, Mode::Region, "Fester Bereich");
-                    if self.s.mode == Mode::Region {
-                        ui.horizontal(|ui| {
-                            ui.add_space(20.0);
-                            ui.label("X");
-                            ui.add(egui::DragValue::new(&mut self.s.region.x));
-                            ui.label("Y");
-                            ui.add(egui::DragValue::new(&mut self.s.region.y));
-                            ui.label("Breite");
-                            ui.add(egui::DragValue::new(&mut self.s.region.w));
-                            ui.label("Höhe");
-                            ui.add(egui::DragValue::new(&mut self.s.region.h));
-                        });
-                        ui.horizontal(|ui| {
-                            ui.add_space(20.0);
-                            if ui.add_enabled(!self.shot_pending, egui::Button::new("Bereich per Maus wählen ...")).clicked() {
-                                grab = true;
-                            }
-                            if self.shot_pending {
-                                ui.label("Screenshot wird erstellt ...");
-                            }
-                        });
-                    }
 
-                    ui.add_space(10.0);
-                    ui.horizontal(|ui| {
-                        ui.strong("Audioquellen");
-                        if ui.small_button("Aktualisieren").clicked() {
-                            refresh_audio = true;
-                        }
+                        card(ui, "Optionen", |ui| {
+                            ui.horizontal(|ui| {
+                                ui.label("Bildrate");
+                                egui::ComboBox::new("fps", "")
+                                    .selected_text(format!("{} fps", self.s.fps))
+                                    .show_ui(ui, |ui| {
+                                        for f in [15u32, 24, 30, 60] {
+                                            ui.selectable_value(&mut self.s.fps, f, format!("{f} fps"));
+                                        }
+                                    });
+                            });
+                            ui.checkbox(&mut self.s.minimize, "Fenster beim Start minimieren");
+                        });
                     });
-                    if self.devices.is_empty() {
-                        ui.label("Keine Audiogeräte gefunden.");
-                    }
-                    for (id, label) in &self.devices {
-                        let mut on = self.s.audio.contains(id);
-                        if ui.checkbox(&mut on, label).changed() {
-                            if on {
-                                self.s.audio.push(id.clone());
-                            } else {
-                                self.s.audio.retain(|x| x != id);
+
+                    ui.add_space(4.0);
+                    let w = ui.available_width();
+                    let big = |text: String, fill: Color32| {
+                        egui::Button::new(RichText::new(text).size(18.0).strong().color(Color32::WHITE))
+                            .fill(fill)
+                            .rounding(12.0)
+                            .min_size(egui::vec2(w, 52.0))
+                    };
+                    match &st {
+                        Some(RecState::Starting) => {
+                            ui.add_enabled(false, big("Starte ...".into(), AMBER));
+                        }
+                        Some(RecState::Saving) => {
+                            ui.add_enabled(false, big("Speichere ...".into(), AMBER));
+                        }
+                        Some(RecState::Recording(t)) => {
+                            let secs = t.elapsed().as_secs();
+                            let label = format!("Aufnahme beenden    {:02}:{:02}", secs / 60, secs % 60);
+                            if ui.add(big(label, RED)).clicked() {
+                                stop = true;
+                            }
+                        }
+                        _ => {
+                            if ui.add_enabled(ff_ready, big("Aufnahme starten".into(), RED)).clicked() {
+                                start = true;
                             }
                         }
                     }
-                    ui.weak("Mehrere Quellen werden gemischt. Keine Auswahl = ohne Ton.");
 
-                    ui.add_space(10.0);
-                    ui.strong("Speicherort");
+                    // Statuszeile
                     ui.horizontal(|ui| {
-                        ui.add(
-                            egui::TextEdit::singleline(&mut self.s.out_dir)
-                                .hint_text(config::default_out_dir().display().to_string())
-                                .desired_width(340.0),
-                        );
-                        if ui.button("Durchsuchen ...").clicked() {
-                            browse = true;
+                        match &st {
+                            Some(RecState::Recording(_)) => {
+                                let on = (ctx.input(|i| i.time) * 1.6) as i64 % 2 == 0;
+                                dot(ui, if on { RED } else { Color32::from_rgb(120, 40, 40) });
+                                ui.label("Aufnahme läuft");
+                            }
+                            Some(RecState::Starting) | Some(RecState::Saving) => {
+                                dot(ui, AMBER);
+                                ui.label("Bitte warten ...");
+                            }
+                            Some(RecState::Done(_)) => {
+                                dot(ui, GREEN);
+                                ui.label("Aufnahme gespeichert");
+                            }
+                            Some(RecState::Failed(_)) => {
+                                dot(ui, RED);
+                                ui.label("Fehler");
+                            }
+                            None => {
+                                dot(ui, if ff_ready { GREEN } else { MUTED });
+                                ui.label(RichText::new(if ff_ready { "Bereit" } else { "Warte auf ffmpeg" }).color(MUTED));
+                            }
                         }
                     });
-                    ui.weak("Leer lassen = Ordner \"videos\" neben der exe.");
-
-                    ui.add_space(10.0);
-                    ui.horizontal(|ui| {
-                        ui.label("Bildrate:");
-                        egui::ComboBox::new("fps", "").selected_text(format!("{} fps", self.s.fps)).show_ui(ui, |ui| {
-                            for f in [15u32, 24, 30, 60] {
-                                ui.selectable_value(&mut self.s.fps, f, format!("{f} fps"));
+                    if let Some(RecState::Done(p)) = &st {
+                        ui.label(RichText::new(p.display().to_string()).size(12.5).color(MUTED));
+                        ui.horizontal(|ui| {
+                            if ui.button("Datei anzeigen").clicked() {
+                                open_path = Some((p.clone(), true));
+                            }
+                            if ui.button("Ordner öffnen").clicked() {
+                                open_path = Some((p.parent().unwrap_or(p).to_path_buf(), false));
                             }
                         });
-                    });
-                    ui.checkbox(&mut self.s.minimize, "Fenster beim Start minimieren");
+                    }
+                    if let Some(RecState::Failed(e)) = &st {
+                        ui.colored_label(RED, e);
+                    }
+                    if !self.msg.is_empty() {
+                        ui.colored_label(RED, &self.msg);
+                    }
                 });
-
-                ui.add_space(14.0);
-                let w = ui.available_width();
-                match &st {
-                    Some(RecState::Starting) => {
-                        ui.add_enabled(false, egui::Button::new("Starte ...").min_size(egui::vec2(w, 44.0)));
-                    }
-                    Some(RecState::Saving) => {
-                        ui.add_enabled(false, egui::Button::new("Speichere ...").min_size(egui::vec2(w, 44.0)));
-                    }
-                    Some(RecState::Recording(t)) => {
-                        let secs = t.elapsed().as_secs();
-                        let label = format!("Stopp   {:02}:{:02}", secs / 60, secs % 60);
-                        if ui.add(egui::Button::new(label).min_size(egui::vec2(w, 44.0))).clicked() {
-                            stop = true;
-                        }
-                    }
-                    _ => {
-                        if ui.add(egui::Button::new("Aufnahme starten").min_size(egui::vec2(w, 44.0))).clicked() {
-                            start = true;
-                        }
-                    }
-                }
-
-                ui.add_space(8.0);
-                if let Some(RecState::Done(p)) = &st {
-                    ui.label(format!("Gespeichert: {}", p.display()));
-                    ui.horizontal(|ui| {
-                        if ui.button("Datei anzeigen").clicked() {
-                            open_path = Some((p.clone(), true));
-                        }
-                        if ui.button("Ordner öffnen").clicked() {
-                            open_path = Some((p.parent().unwrap_or(p).to_path_buf(), false));
-                        }
-                    });
-                }
-                if let Some(RecState::Failed(e)) = &st {
-                    ui.colored_label(egui::Color32::LIGHT_RED, format!("Fehler: {e}"));
-                }
-                if !self.msg.is_empty() {
-                    ui.colored_label(egui::Color32::LIGHT_RED, &self.msg);
-                }
             });
-        });
 
+        if retry_ff {
+            ffmpeg::ensure(self.ff.clone(), ctx.clone());
+        }
         if refresh_win {
             self.windows = winapi::list_windows();
         }
@@ -419,9 +609,16 @@ fn main() -> eframe::Result<()> {
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_inner_size(SMALL)
-            .with_min_inner_size([480.0, 520.0])
+            .with_min_inner_size([500.0, 560.0])
             .with_title(APP_TITLE),
         ..Default::default()
     };
-    eframe::run_native(APP_TITLE, options, Box::new(|_cc| Ok(Box::new(App::new()))))
+    eframe::run_native(
+        APP_TITLE,
+        options,
+        Box::new(|cc| {
+            setup_style(&cc.egui_ctx);
+            Ok(Box::new(App::new(&cc.egui_ctx)))
+        }),
+    )
 }
