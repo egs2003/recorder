@@ -16,7 +16,9 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 pub const APP_TITLE: &str = "Bildschirm-Recorder";
-const SMALL: [f32; 2] = [560.0, 820.0];
+const VERSION: &str = env!("CARGO_PKG_VERSION");
+const REPO_URL: &str = "https://github.com/egs2003/recorder";
+const SMALL: [f32; 2] = [600.0, 800.0];
 const BIG: [f32; 2] = [1150.0, 780.0];
 
 // Farben
@@ -30,6 +32,9 @@ const RED: Color32 = Color32::from_rgb(232, 64, 64);
 const GREEN: Color32 = Color32::from_rgb(70, 190, 120);
 const AMBER: Color32 = Color32::from_rgb(235, 170, 50);
 const MUTED: Color32 = Color32::from_rgb(140, 147, 163);
+const INFO_BG: Color32 = Color32::from_rgb(26, 35, 64);
+const INFO_TEXT: Color32 = Color32::from_rgb(169, 184, 230);
+const ERR_BG: Color32 = Color32::from_rgb(52, 26, 30);
 
 type Shot = Result<(usize, usize, Vec<u8>), String>;
 
@@ -75,20 +80,20 @@ fn list_audio() -> Vec<(SourceId, String)> {
 fn setup_style(ctx: &egui::Context) {
     use egui::{FontFamily, FontId, Rounding, Stroke, TextStyle};
     let mut style = (*ctx.style()).clone();
-    style.text_styles.insert(TextStyle::Heading, FontId::new(26.0, FontFamily::Proportional));
+    style.text_styles.insert(TextStyle::Heading, FontId::new(24.0, FontFamily::Proportional));
     style.text_styles.insert(TextStyle::Body, FontId::new(15.0, FontFamily::Proportional));
     style.text_styles.insert(TextStyle::Button, FontId::new(15.0, FontFamily::Proportional));
     style.text_styles.insert(TextStyle::Small, FontId::new(12.5, FontFamily::Proportional));
-    style.spacing.item_spacing = egui::vec2(10.0, 10.0);
-    style.spacing.button_padding = egui::vec2(14.0, 7.0);
-    style.spacing.interact_size.y = 30.0;
+    style.spacing.item_spacing = egui::vec2(8.0, 7.0);
+    style.spacing.button_padding = egui::vec2(12.0, 6.0);
+    style.spacing.interact_size.y = 26.0;
 
     let mut v = egui::Visuals::dark();
     v.panel_fill = BG;
     v.window_fill = CARD;
     v.extreme_bg_color = Color32::from_rgb(24, 26, 32);
     v.selection.bg_fill = ACCENT;
-    v.selection.stroke = Stroke::new(1.0, Color32::WHITE);
+    v.selection.stroke = Stroke::new(1.0, ACCENT);
     v.hyperlink_color = ACCENT;
     let r = Rounding::same(9.0);
     v.widgets.noninteractive.rounding = r;
@@ -116,7 +121,7 @@ fn card(ui: &mut egui::Ui, title: &str, add: impl FnOnce(&mut egui::Ui)) {
         .fill(CARD)
         .stroke(egui::Stroke::new(1.0, BORDER))
         .rounding(14.0)
-        .inner_margin(egui::Margin::same(16.0))
+        .inner_margin(egui::Margin::same(14.0))
         .show(ui, |ui| {
             ui.set_width(ui.available_width());
             ui.label(RichText::new(title.to_uppercase()).size(12.0).color(MUTED).strong());
@@ -149,6 +154,72 @@ fn dot(ui: &mut egui::Ui, color: Color32) {
 
 fn mb(b: u64) -> String {
     format!("{:.0} MB", b as f64 / 1_048_576.0)
+}
+
+fn ffmpeg_card(ui: &mut egui::Ui, st: &FfState, retry: &mut bool) {
+    let failed = matches!(st, FfState::Failed(_));
+    let (fill, accent) = if failed { (ERR_BG, RED) } else { (INFO_BG, ACCENT) };
+    egui::Frame::none()
+        .fill(fill)
+        .stroke(egui::Stroke::new(1.0, accent))
+        .rounding(14.0)
+        .inner_margin(egui::Margin::same(14.0))
+        .show(ui, |ui| {
+            ui.set_width(ui.available_width());
+            ui.horizontal(|ui| {
+                let (r, _) = ui.allocate_exact_size(egui::vec2(34.0, 34.0), egui::Sense::hover());
+                {
+                    let p = ui.painter();
+                    let c = r.center();
+                    p.circle_filled(c, 17.0, accent);
+                    if failed {
+                        p.text(c, egui::Align2::CENTER_CENTER, "!", egui::FontId::proportional(20.0), Color32::WHITE);
+                    } else {
+                        let s = egui::Stroke::new(2.2, Color32::WHITE);
+                        p.line_segment([c + egui::vec2(0.0, -8.0), c + egui::vec2(0.0, 6.0)], s);
+                        p.line_segment([c + egui::vec2(-5.0, 1.0), c + egui::vec2(0.0, 7.0)], s);
+                        p.line_segment([c + egui::vec2(5.0, 1.0), c + egui::vec2(0.0, 7.0)], s);
+                    }
+                }
+                ui.vertical(|ui| {
+                    let title = if failed { "ffmpeg konnte nicht eingerichtet werden" } else { "ffmpeg wird eingerichtet" };
+                    ui.label(RichText::new(title).size(16.0).strong());
+                    if !failed {
+                        ui.label(RichText::new("Einmalig beim ersten Start. Danach ist die App bereit.").size(12.5).color(INFO_TEXT));
+                    }
+                });
+            });
+            match st {
+                FfState::Downloading { done, total } => {
+                    if *total > 0 {
+                        ui.add(egui::ProgressBar::new(*done as f32 / *total as f32).desired_height(10.0).fill(ACCENT));
+                        ui.horizontal(|ui| {
+                            ui.label(RichText::new(format!("{} von {}", mb(*done), mb(*total))).size(13.0));
+                            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                ui.label(RichText::new(format!("{} %", (*done * 100 / *total).min(100))).size(13.0));
+                            });
+                        });
+                    } else {
+                        ui.add(egui::ProgressBar::new(0.0).desired_height(10.0).fill(ACCENT).animate(true));
+                        ui.label(RichText::new(format!("{} heruntergeladen", mb(*done))).size(13.0));
+                    }
+                }
+                FfState::Extracting => {
+                    ui.add(egui::ProgressBar::new(1.0).desired_height(10.0).fill(ACCENT).animate(true));
+                    ui.label(RichText::new("Wird entpackt ...").size(13.0));
+                }
+                FfState::Failed(e) => {
+                    ui.label(RichText::new(e).size(13.0).color(Color32::from_rgb(240, 170, 170)));
+                    if ui.button("Erneut versuchen").clicked() {
+                        *retry = true;
+                    }
+                }
+                _ => {}
+            }
+            ui.horizontal(|ui| {
+                ui.label(RichText::new("Aufnahme und Einstellungen sind bis zum Abschluss gesperrt.").size(12.5).color(if failed { Color32::from_rgb(240, 170, 170) } else { INFO_TEXT }));
+            });
+        });
 }
 
 impl App {
@@ -309,44 +380,116 @@ impl eframe::App for App {
         let mut retry_ff = false;
         let mut open_path: Option<(PathBuf, bool)> = None;
 
-        egui::CentralPanel::default()
-            .frame(egui::Frame::none().fill(BG).inner_margin(egui::Margin::symmetric(20.0, 16.0)))
+        egui::TopBottomPanel::bottom("bottom")
+            .frame(egui::Frame::none().fill(BG).inner_margin(egui::Margin::symmetric(20.0, 12.0)))
             .show(ctx, |ui| {
-                egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
-                    ui.label(RichText::new(APP_TITLE).size(26.0).strong());
-                    ui.label(RichText::new("Bildschirm und Ton aufnehmen").color(MUTED));
-                    ui.add_space(4.0);
-
-                    // ffmpeg-Status
-                    if !ff_ready {
-                        card(ui, "ffmpeg", |ui| match &ffst {
-                            FfState::Checking => {
-                                ui.label("Prüfe ffmpeg ...");
+                    let w = ui.available_width();
+                    let big = |text: String, fill: Color32| {
+                        egui::Button::new(RichText::new(text).size(18.0).strong().color(Color32::WHITE))
+                            .fill(fill)
+                            .rounding(12.0)
+                            .min_size(egui::vec2(w, 52.0))
+                    };
+                    match &st {
+                        Some(RecState::Starting) => {
+                            ui.add_enabled(false, big("Starte ...".into(), AMBER));
+                        }
+                        Some(RecState::Saving) => {
+                            ui.add_enabled(false, big("Speichere ...".into(), AMBER));
+                        }
+                        Some(RecState::Recording(t)) => {
+                            let secs = t.elapsed().as_secs();
+                            let label = format!("Aufnahme beenden    {:02}:{:02}", secs / 60, secs % 60);
+                            if ui.add(big(label, RED)).clicked() {
+                                stop = true;
                             }
-                            FfState::Downloading { done, total } => {
-                                if *total > 0 {
-                                    ui.label(format!("ffmpeg wird heruntergeladen ({} von {})", mb(*done), mb(*total)));
-                                    ui.add(egui::ProgressBar::new(*done as f32 / *total as f32).show_percentage());
-                                } else {
-                                    ui.label(format!("ffmpeg wird heruntergeladen ({})", mb(*done)));
-                                    ui.add(egui::ProgressBar::new(0.0).animate(true));
-                                }
+                        }
+                        _ => {
+                            if ui
+                                .add_enabled(ff_ready, big("Aufnahme starten".into(), if ff_ready { RED } else { WIDGET }))
+                                .clicked()
+                            {
+                                start = true;
                             }
-                            FfState::Extracting => {
-                                ui.label("ffmpeg wird entpackt ...");
-                                ui.add(egui::ProgressBar::new(1.0).animate(true));
-                            }
-                            FfState::Failed(e) => {
-                                ui.colored_label(RED, format!("ffmpeg konnte nicht bereitgestellt werden: {e}"));
-                                if ui.button("Erneut versuchen").clicked() {
-                                    retry_ff = true;
-                                }
-                            }
-                            FfState::Ready => {}
-                        });
+                        }
                     }
 
-                    ui.add_enabled_ui(!active, |ui| {
+                    // Statuszeile
+                    ui.horizontal(|ui| {
+                        match &st {
+                            Some(RecState::Recording(_)) => {
+                                let on = (ctx.input(|i| i.time) * 1.6) as i64 % 2 == 0;
+                                dot(ui, if on { RED } else { Color32::from_rgb(120, 40, 40) });
+                                ui.label("Aufnahme läuft");
+                            }
+                            Some(RecState::Starting) | Some(RecState::Saving) => {
+                                dot(ui, AMBER);
+                                ui.label("Bitte warten ...");
+                            }
+                            Some(RecState::Done(_)) => {
+                                dot(ui, GREEN);
+                                ui.label("Aufnahme gespeichert");
+                            }
+                            Some(RecState::Failed(_)) => {
+                                dot(ui, RED);
+                                ui.label("Fehler");
+                            }
+                            None => {
+                                dot(ui, if ff_ready { GREEN } else { MUTED });
+                                ui.label(RichText::new(if ff_ready { "Bereit" } else { "Warte auf ffmpeg" }).color(MUTED));
+                            }
+                        }
+                    });
+                    if let Some(RecState::Done(p)) = &st {
+                        ui.label(RichText::new(p.display().to_string()).size(12.5).color(MUTED));
+                        ui.horizontal(|ui| {
+                            if ui.button("Datei anzeigen").clicked() {
+                                open_path = Some((p.clone(), true));
+                            }
+                            if ui.button("Ordner öffnen").clicked() {
+                                open_path = Some((p.parent().unwrap_or(p).to_path_buf(), false));
+                            }
+                        });
+                    }
+                    if let Some(RecState::Failed(e)) = &st {
+                        ui.colored_label(RED, e);
+                    }
+                    if !self.msg.is_empty() {
+                        ui.colored_label(RED, &self.msg);
+                    }
+            });
+
+        egui::CentralPanel::default()
+            .frame(egui::Frame::none().fill(BG).inner_margin(egui::Margin::symmetric(20.0, 14.0)))
+            .show(ctx, |ui| {
+                egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
+                    ui.horizontal(|ui| {
+                        ui.vertical(|ui| {
+                            ui.label(RichText::new(APP_TITLE).size(26.0).strong());
+                            ui.label(RichText::new("Bildschirm und Ton aufnehmen").color(MUTED));
+                        });
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::TOP), |ui| {
+                            let chip = ui
+                                .add(
+                                    egui::Button::new(RichText::new(format!("GitHub  v{VERSION}")).size(12.5).color(MUTED))
+                                        .fill(CARD)
+                                        .rounding(999.0),
+                                )
+                                .on_hover_cursor(egui::CursorIcon::PointingHand)
+                                .on_hover_text(REPO_URL);
+                            if chip.clicked() {
+                                ctx.open_url(egui::OpenUrl::new_tab(REPO_URL));
+                            }
+                        });
+                    });
+                    ui.add_space(2.0);
+
+                    // Während des Downloads ist alles gesperrt
+                    if !ff_ready && !matches!(ffst, FfState::Checking) {
+                        ffmpeg_card(ui, &ffst, &mut retry_ff);
+                    }
+
+                    ui.add_enabled_ui(!active && ff_ready, |ui| {
                         card(ui, "Aufnahmebereich", |ui| {
                             segmented(
                                 ui,
@@ -370,7 +513,7 @@ impl eframe::App for App {
                                         .unwrap_or_else(|| "-".into());
                                     egui::ComboBox::new("mon", "")
                                         .selected_text(label)
-                                        .width(ui.available_width() - 8.0)
+                                        .width(ui.available_width() - 24.0)
                                         .show_ui(ui, |ui| {
                                             for (i, m) in self.monitors.iter().enumerate() {
                                                 ui.selectable_value(&mut self.s.monitor, i, m.label(i));
@@ -383,18 +526,18 @@ impl eframe::App for App {
                                     } else {
                                         self.s.window_title.clone()
                                     };
-                                    ui.horizontal(|ui| {
+                                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                        if ui.button("Aktualisieren").clicked() {
+                                            refresh_win = true;
+                                        }
                                         egui::ComboBox::new("win", "")
                                             .selected_text(label)
-                                            .width(ui.available_width() - 130.0)
+                                            .width((ui.available_width() - 24.0).max(80.0))
                                             .show_ui(ui, |ui| {
                                                 for t in &self.windows {
                                                     ui.selectable_value(&mut self.s.window_title, t.clone(), t);
                                                 }
                                             });
-                                        if ui.button("Aktualisieren").clicked() {
-                                            refresh_win = true;
-                                        }
                                     });
                                     ui.label(
                                         RichText::new("Aufgenommen wird der Bildschirmbereich des Fensters. Fenster nicht verschieben oder verdecken.")
@@ -451,16 +594,16 @@ impl eframe::App for App {
                         });
 
                         card(ui, "Speicherort", |ui| {
-                            ui.horizontal(|ui| {
-                                ui.add(
-                                    egui::TextEdit::singleline(&mut self.s.out_dir)
-                                        .hint_text(config::default_out_dir().display().to_string())
-                                        .desired_width(ui.available_width() - 130.0)
-                                        .margin(egui::vec2(10.0, 7.0)),
-                                );
+                            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                                 if ui.button("Durchsuchen ...").clicked() {
                                     browse = true;
                                 }
+                                ui.add_sized(
+                                    [ui.available_width(), 30.0],
+                                    egui::TextEdit::singleline(&mut self.s.out_dir)
+                                        .hint_text(config::default_out_dir().display().to_string())
+                                        .margin(egui::vec2(10.0, 6.0)),
+                                );
                             });
                             ui.label(RichText::new("Leer = Ordner \"videos\" neben der exe.").size(12.5).color(MUTED));
                         });
@@ -480,78 +623,6 @@ impl eframe::App for App {
                         });
                     });
 
-                    ui.add_space(4.0);
-                    let w = ui.available_width();
-                    let big = |text: String, fill: Color32| {
-                        egui::Button::new(RichText::new(text).size(18.0).strong().color(Color32::WHITE))
-                            .fill(fill)
-                            .rounding(12.0)
-                            .min_size(egui::vec2(w, 52.0))
-                    };
-                    match &st {
-                        Some(RecState::Starting) => {
-                            ui.add_enabled(false, big("Starte ...".into(), AMBER));
-                        }
-                        Some(RecState::Saving) => {
-                            ui.add_enabled(false, big("Speichere ...".into(), AMBER));
-                        }
-                        Some(RecState::Recording(t)) => {
-                            let secs = t.elapsed().as_secs();
-                            let label = format!("Aufnahme beenden    {:02}:{:02}", secs / 60, secs % 60);
-                            if ui.add(big(label, RED)).clicked() {
-                                stop = true;
-                            }
-                        }
-                        _ => {
-                            if ui.add_enabled(ff_ready, big("Aufnahme starten".into(), RED)).clicked() {
-                                start = true;
-                            }
-                        }
-                    }
-
-                    // Statuszeile
-                    ui.horizontal(|ui| {
-                        match &st {
-                            Some(RecState::Recording(_)) => {
-                                let on = (ctx.input(|i| i.time) * 1.6) as i64 % 2 == 0;
-                                dot(ui, if on { RED } else { Color32::from_rgb(120, 40, 40) });
-                                ui.label("Aufnahme läuft");
-                            }
-                            Some(RecState::Starting) | Some(RecState::Saving) => {
-                                dot(ui, AMBER);
-                                ui.label("Bitte warten ...");
-                            }
-                            Some(RecState::Done(_)) => {
-                                dot(ui, GREEN);
-                                ui.label("Aufnahme gespeichert");
-                            }
-                            Some(RecState::Failed(_)) => {
-                                dot(ui, RED);
-                                ui.label("Fehler");
-                            }
-                            None => {
-                                dot(ui, if ff_ready { GREEN } else { MUTED });
-                                ui.label(RichText::new(if ff_ready { "Bereit" } else { "Warte auf ffmpeg" }).color(MUTED));
-                            }
-                        }
-                    });
-                    if let Some(RecState::Done(p)) = &st {
-                        ui.label(RichText::new(p.display().to_string()).size(12.5).color(MUTED));
-                        ui.horizontal(|ui| {
-                            if ui.button("Datei anzeigen").clicked() {
-                                open_path = Some((p.clone(), true));
-                            }
-                            if ui.button("Ordner öffnen").clicked() {
-                                open_path = Some((p.parent().unwrap_or(p).to_path_buf(), false));
-                            }
-                        });
-                    }
-                    if let Some(RecState::Failed(e)) = &st {
-                        ui.colored_label(RED, e);
-                    }
-                    if !self.msg.is_empty() {
-                        ui.colored_label(RED, &self.msg);
-                    }
                 });
             });
 
@@ -609,7 +680,7 @@ fn main() -> eframe::Result<()> {
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_inner_size(SMALL)
-            .with_min_inner_size([500.0, 560.0])
+            .with_min_inner_size([520.0, 520.0])
             .with_title(APP_TITLE),
         ..Default::default()
     };
