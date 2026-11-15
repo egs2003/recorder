@@ -1,4 +1,5 @@
 use crate::config::{exe_dir, Mode, Settings, SourceId};
+use crate::indicator::Indicator;
 use crate::winapi;
 use anyhow::{anyhow, bail, Context, Result};
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
@@ -54,42 +55,70 @@ fn log_tail(p: &Path) -> String {
     s[start..].to_string()
 }
 
-fn input_args(s: &Settings) -> Result<Vec<String>> {
+type Area = (i32, i32, i32, i32);
+
+/// Schneidet den Bereich auf den virtuellen Desktop zu und macht Breite/Höhe gerade.
+fn clamp_area(a: Area, v: Area) -> Result<Area> {
+    let x0 = a.0.max(v.0);
+    let y0 = a.1.max(v.1);
+    let x1 = (a.0 + a.2).min(v.0 + v.2);
+    let y1 = (a.1 + a.3).min(v.1 + v.3);
+    let (w, h) = ((x1 - x0) & !1, (y1 - y0) & !1);
+    if w < 16 || h < 16 {
+        bail!("Der Aufnahmebereich liegt außerhalb des Bildschirms oder ist zu klein");
+    }
+    Ok((x0, y0, w, h))
+}
+
+/// Liefert die ffmpeg-Eingabeargumente und den aufgenommenen Bereich (für den roten Rahmen).
+fn input_args(s: &Settings) -> Result<(Vec<String>, Area)> {
+    let mons = winapi::list_monitors();
+    let virt = winapi::virtual_bounds(&mons);
     let mut a: Vec<String> = ["-f", "gdigrab", "-framerate"].map(String::from).to_vec();
     a.push(s.fps.to_string());
     a.extend(["-draw_mouse", "1"].map(String::from));
 
-    let rect = |a: &mut Vec<String>, x: i32, y: i32, w: i32, h: i32| {
-        a.extend(["-offset_x".to_string(), x.to_string()]);
-        a.extend(["-offset_y".to_string(), y.to_string()]);
-        a.extend(["-video_size".to_string(), format!("{}x{}", w, h)]);
+    let rect = |a: &mut Vec<String>, r: Area| {
+        a.extend(["-offset_x".to_string(), r.0.to_string()]);
+        a.extend(["-offset_y".to_string(), r.1.to_string()]);
+        a.extend(["-video_size".to_string(), format!("{}x{}", r.2, r.3)]);
         a.extend(["-i".to_string(), "desktop".to_string()]);
     };
 
+    let area: Area;
     match s.mode {
-        Mode::Desktop => a.extend(["-i", "desktop"].map(String::from)),
+        Mode::Desktop => {
+            a.extend(["-i", "desktop"].map(String::from));
+            area = virt;
+        }
         Mode::Monitor => {
-            let mons = winapi::list_monitors();
             let m = mons
                 .get(s.monitor)
                 .ok_or_else(|| anyhow!("Monitor {} nicht gefunden", s.monitor + 1))?;
-            rect(&mut a, m.x, m.y, m.w, m.h);
+            area = (m.x, m.y, m.w, m.h);
+            rect(&mut a, area);
         }
         Mode::Window => {
             if s.window_title.trim().is_empty() {
                 bail!("Kein Fenster ausgewählt");
             }
-            a.extend(["-i".to_string(), format!("title={}", s.window_title)]);
+            let hwnd = winapi::find_window(&s.window_title)
+                .ok_or_else(|| anyhow!("Fenster nicht gefunden: {}", s.window_title))?;
+            // Browser & Co. liefern bei direkter Fensteraufnahme (gdigrab title=) ein schwarzes Bild.
+            // Deshalb wird der Bildschirmbereich aufgenommen, an dem das Fenster gerade liegt.
+            winapi::bring_to_front(hwnd);
+            thread::sleep(Duration::from_millis(500));
+            let r = winapi::window_rect(hwnd).ok_or_else(|| anyhow!("Fensterposition nicht ermittelbar"))?;
+            area = clamp_area(r, virt)?;
+            rect(&mut a, area);
         }
         Mode::Region => {
             let r = &s.region;
-            if r.w < 16 || r.h < 16 {
-                bail!("Der Bereich ist zu klein (mindestens 16x16 Pixel)");
-            }
-            rect(&mut a, r.x, r.y, r.w & !1, r.h & !1);
+            area = clamp_area((r.x, r.y, r.w, r.h), virt)?;
+            rect(&mut a, area);
         }
     }
-    Ok(a)
+    Ok((a, area))
 }
 
 /// Einzelbild des gesamten Desktops (für die Bereichsauswahl).
@@ -270,8 +299,6 @@ fn run(s: &Settings, stop: &AtomicBool, state: &Mutex<RecState>, ctx: &eframe::e
     let video_tmp = tmp.join(format!("rec_{stamp}_video.mp4"));
     let log_path = tmp.join(format!("rec_{stamp}_ffmpeg.log"));
 
-    let input = input_args(s)?;
-
     // Audio vorbereiten (Streams laufen erst nach play())
     let host = cpal::default_host();
     let mut audio: Vec<(Stream, Arc<Mutex<AudioState>>, PathBuf)> = Vec::new();
@@ -285,6 +312,10 @@ fn run(s: &Settings, stop: &AtomicBool, state: &Mutex<RecState>, ctx: &eframe::e
         ctx.send_viewport_cmd(eframe::egui::ViewportCommand::Minimized(true));
         thread::sleep(Duration::from_millis(700));
     }
+
+    let (input, area) = input_args(s)?;
+    // Roter Rahmen, der nicht mit aufgenommen wird
+    let indicator = Indicator::show(area.0, area.1, area.2, area.3);
 
     // Video starten
     let log = File::create(&log_path)?;
@@ -353,6 +384,7 @@ fn run(s: &Settings, stop: &AtomicBool, state: &Mutex<RecState>, ctx: &eframe::e
 
     // Stoppen
     *state.lock().unwrap() = RecState::Saving;
+    drop(indicator);
     let mut audio_files = Vec::new();
     for (stream, st, wav) in audio {
         drop(stream);

@@ -7,4 +7,4 @@ Portabler Bildschirm-Recorder mit Audio für Windows (Rust, egui, ffmpeg).
 - Speicherort: standardmäßig `videos\` neben der exe, frei wählbar
 - Einstellungen werden in `settings.json` neben der exe gespeichert
 
-`ffmpeg.exe` muss neben `recorder.exe` liegen (im Build-Artifact enthalten).
+`ffmpeg.exe` muss neben `recorder.exe` liegen (oder im PATH verfügbar sein). Es ist nicht im Build enthalten.

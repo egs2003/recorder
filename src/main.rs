@@ -1,6 +1,7 @@
 #![windows_subsystem = "windows"]
 
 mod config;
+mod indicator;
 mod rec;
 mod winapi;
 
@@ -248,7 +249,7 @@ impl eframe::App for App {
                         });
                         ui.horizontal(|ui| {
                             ui.add_space(20.0);
-                            ui.weak("Das Fenster sollte sichtbar und nicht verdeckt sein.");
+                            ui.weak("Wird als Bildschirmbereich aufgenommen: Fenster nicht verschieben oder verdecken.");
                         });
                     }
                     ui.radio_value(&mut self.s.mode, Mode::Region, "Fester Bereich");

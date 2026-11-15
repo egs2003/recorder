@@ -4,8 +4,8 @@ use windows_sys::Win32::Graphics::Dwm::DwmGetWindowAttribute;
 use windows_sys::Win32::Graphics::Gdi::{EnumDisplayMonitors, GetMonitorInfoW, HDC, HMONITOR, MONITORINFO};
 use windows_sys::Win32::UI::HiDpi::SetProcessDpiAwarenessContext;
 use windows_sys::Win32::UI::WindowsAndMessaging::{
-    EnumWindows, GetWindowLongW, GetWindowTextLengthW, GetWindowTextW, IsIconic, IsWindowVisible,
-    GWL_EXSTYLE, WS_EX_TOOLWINDOW,
+    EnumWindows, GetWindowLongW, GetWindowRect, GetWindowTextLengthW, GetWindowTextW, IsIconic,
+    IsWindowVisible, SetForegroundWindow, ShowWindow, GWL_EXSTYLE, SW_RESTORE, WS_EX_TOOLWINDOW,
 };
 
 #[derive(Clone, Debug)]
@@ -80,7 +80,7 @@ pub fn virtual_bounds(m: &[Monitor]) -> (i32, i32, i32, i32) {
 }
 
 unsafe extern "system" fn window_cb(h: HWND, lp: LPARAM) -> BOOL {
-    let v = &mut *(lp as *mut Vec<String>);
+    let v = &mut *(lp as *mut Vec<(isize, String)>);
     if IsWindowVisible(h) == 0 || IsIconic(h) != 0 {
         return 1;
     }
@@ -101,18 +101,50 @@ unsafe extern "system" fn window_cb(h: HWND, lp: LPARAM) -> BOOL {
     let mut buf = vec![0u16; len as usize + 1];
     let n = GetWindowTextW(h, buf.as_mut_ptr(), buf.len() as i32);
     if n > 0 {
-        v.push(String::from_utf16_lossy(&buf[..n as usize]));
+        v.push((h, String::from_utf16_lossy(&buf[..n as usize])));
     }
     1
 }
 
-pub fn list_windows() -> Vec<String> {
-    let mut v: Vec<String> = Vec::new();
+fn enum_windows() -> Vec<(isize, String)> {
+    let mut v: Vec<(isize, String)> = Vec::new();
     unsafe {
         EnumWindows(Some(window_cb), &mut v as *mut _ as LPARAM);
     }
-    v.retain(|t| t != "Program Manager" && t != crate::APP_TITLE);
+    v.retain(|(_, t)| t != "Program Manager" && t != crate::APP_TITLE);
+    v
+}
+
+pub fn list_windows() -> Vec<String> {
+    let mut v: Vec<String> = enum_windows().into_iter().map(|(_, t)| t).collect();
     v.sort_by_key(|t| t.to_lowercase());
     v.dedup();
     v
+}
+
+/// Findet ein sichtbares Fenster anhand seines Titels.
+pub fn find_window(title: &str) -> Option<isize> {
+    enum_windows().into_iter().find(|(_, t)| t == title).map(|(h, _)| h)
+}
+
+pub fn bring_to_front(hwnd: isize) {
+    unsafe {
+        if IsIconic(hwnd) != 0 {
+            ShowWindow(hwnd, SW_RESTORE);
+        }
+        SetForegroundWindow(hwnd);
+    }
+}
+
+/// Sichtbarer Fensterbereich (ohne unsichtbaren Schattenrand) in Bildschirmpixeln: (x, y, w, h)
+pub fn window_rect(hwnd: isize) -> Option<(i32, i32, i32, i32)> {
+    unsafe {
+        let mut r: RECT = std::mem::zeroed();
+        // 9 = DWMWA_EXTENDED_FRAME_BOUNDS
+        let hr = DwmGetWindowAttribute(hwnd, 9, &mut r as *mut RECT as *mut c_void, std::mem::size_of::<RECT>() as u32);
+        if hr != 0 && GetWindowRect(hwnd, &mut r) == 0 {
+            return None;
+        }
+        Some((r.left, r.top, r.right - r.left, r.bottom - r.top))
+    }
 }
