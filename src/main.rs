@@ -176,12 +176,12 @@ fn build_style(p: &Pal, light: bool) -> egui::Style {
     v.widgets.hovered.bg_fill = p.widget_hover;
     v.widgets.hovered.bg_stroke = Stroke::new(1.0, p.accent);
     v.widgets.active.rounding = r;
-    v.widgets.active.weak_bg_fill = p.accent;
-    v.widgets.active.bg_fill = p.accent;
-    if light {
-        // gedrückte Schaltfläche (blauer Hintergrund): weiße Schrift statt dunkler
-        v.widgets.active.fg_stroke = Stroke::new(2.0, Color32::WHITE);
-    }
+    // Achtung: `RichText::strong()` nimmt die Farbe von widgets.active.fg_stroke. Diese Schriftfarbe
+    // deshalb nie ändern (hell: dunkel, dunkel: hell), sondern den Hintergrund anpassen: im hellen
+    // Design bekommt der gedrückte Zustand den hellblauen statt des kräftigen Akzent-Hintergrunds.
+    let pressed = if light { p.sel_bg } else { p.accent };
+    v.widgets.active.weak_bg_fill = pressed;
+    v.widgets.active.bg_fill = pressed;
     v.widgets.open.rounding = r;
     v.widgets.open.weak_bg_fill = p.widget_hover;
     v.widgets.open.bg_fill = p.widget_hover;
