@@ -457,6 +457,7 @@ impl eframe::App for App {
         let mut refresh_audio = false;
         let mut retry_ff = false;
         let mut identify_monitors = false;
+        let mut refresh_mon = false;
         let mut open_path: Option<(PathBuf, bool)> = None;
 
         egui::TopBottomPanel::bottom("bottom")
@@ -601,6 +602,9 @@ impl eframe::App for App {
                                         egui::vec2(row_width, 30.0),
                                         egui::Layout::right_to_left(egui::Align::Center),
                                         |ui| {
+                                            if ui.button("Aktualisieren").clicked() {
+                                                refresh_mon = true;
+                                            }
                                             if ui.button("Identifizieren").clicked() {
                                                 identify_monitors = true;
                                             }
@@ -760,10 +764,12 @@ impl eframe::App for App {
         if refresh_audio {
             self.devices = list_audio();
         }
-        if identify_monitors {
-            // Monitorliste neu einlesen (Monitor an-/abgesteckt?), dann Nummern einblenden
+        if refresh_mon || identify_monitors {
+            // Monitorliste neu einlesen (Monitor an-/abgesteckt?)
             self.monitors = winapi::list_monitors();
             self.s.monitor = self.s.monitor.min(self.monitors.len().saturating_sub(1));
+        }
+        if identify_monitors {
             let rects: Vec<_> = self.monitors.iter().map(|m| (m.x, m.y, m.w, m.h)).collect();
             identify::show(&rects, self.s.monitor);
         }
