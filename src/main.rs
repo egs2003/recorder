@@ -2,6 +2,7 @@
 
 mod config;
 mod ffmpeg;
+mod identify;
 mod indicator;
 mod plan;
 mod rec;
@@ -455,6 +456,7 @@ impl eframe::App for App {
         let mut refresh_win = false;
         let mut refresh_audio = false;
         let mut retry_ff = false;
+        let mut identify_monitors = false;
         let mut open_path: Option<(PathBuf, bool)> = None;
 
         egui::TopBottomPanel::bottom("bottom")
@@ -593,14 +595,34 @@ impl eframe::App for App {
                                         .get(self.s.monitor)
                                         .map(|m| m.label(self.s.monitor))
                                         .unwrap_or_else(|| "-".into());
-                                    egui::ComboBox::new("mon", "")
-                                        .selected_text(label)
-                                        .width(ui.available_width() - 24.0)
-                                        .show_ui(ui, |ui| {
-                                            for (i, m) in self.monitors.iter().enumerate() {
-                                                ui.selectable_value(&mut self.s.monitor, i, m.label(i));
+                                    let before = self.s.monitor;
+                                    let row_width = ui.available_width();
+                                    ui.allocate_ui_with_layout(
+                                        egui::vec2(row_width, 30.0),
+                                        egui::Layout::right_to_left(egui::Align::Center),
+                                        |ui| {
+                                            if ui.button("Identifizieren").clicked() {
+                                                identify_monitors = true;
                                             }
-                                        });
+                                            egui::ComboBox::new("mon", "")
+                                                .selected_text(label)
+                                                .width((ui.available_width() - 24.0).max(80.0))
+                                                .show_ui(ui, |ui| {
+                                                    for (i, m) in self.monitors.iter().enumerate() {
+                                                        ui.selectable_value(&mut self.s.monitor, i, m.label(i));
+                                                    }
+                                                });
+                                        },
+                                    );
+                                    // Wer einen anderen Monitor wählt, sieht sofort, welcher es ist
+                                    if self.s.monitor != before {
+                                        identify_monitors = true;
+                                    }
+                                    ui.label(
+                                        RichText::new("Die Nummer entspricht der Nummer in der Liste. Der gewählte Monitor ist blau.")
+                                            .size(12.5)
+                                            .color(pal().muted),
+                                    );
                                 }
                                 Mode::Window => {
                                     let label = if self.s.window_title.is_empty() {
@@ -737,6 +759,13 @@ impl eframe::App for App {
         }
         if refresh_audio {
             self.devices = list_audio();
+        }
+        if identify_monitors {
+            // Monitorliste neu einlesen (Monitor an-/abgesteckt?), dann Nummern einblenden
+            self.monitors = winapi::list_monitors();
+            self.s.monitor = self.s.monitor.min(self.monitors.len().saturating_sub(1));
+            let rects: Vec<_> = self.monitors.iter().map(|m| (m.x, m.y, m.w, m.h)).collect();
+            identify::show(&rects, self.s.monitor);
         }
         if browse {
             let mut d = rfd::FileDialog::new();
