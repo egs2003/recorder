@@ -3,17 +3,18 @@
 //! Die Fenster sind klick-durchlässig, nehmen keinen Fokus und verschwinden von selbst wieder.
 //! Die Nummer entspricht der Nummer in der Monitor-Auswahlliste.
 
-use std::cell::{Cell, RefCell};
+use std::cell::Cell;
 use std::sync::Mutex;
 use std::thread;
 use windows_sys::Win32::Foundation::{HWND, LPARAM, LRESULT, RECT, WPARAM};
 use windows_sys::Win32::Graphics::Gdi::{
-    BeginPaint, CreateRoundRectRgn, CreateSolidBrush, DeleteObject, EndPaint, FillRect, SetWindowRgn, PAINTSTRUCT,
+    BeginPaint, CreateFontW, CreateRoundRectRgn, CreateSolidBrush, DeleteObject, EndPaint, FillRect, SelectObject,
+    SetBkMode, SetTextColor, SetWindowRgn, DrawTextW, PAINTSTRUCT,
 };
 use windows_sys::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows_sys::Win32::UI::WindowsAndMessaging::{
-    CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW, GetClientRect, GetMessageW, PostMessageW,
-    PostQuitMessage, RegisterClassW, SetLayeredWindowAttributes, SetTimer, ShowWindow,
+    CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW, GetClientRect, GetMessageW, GetWindowTextW,
+    PostMessageW, PostQuitMessage, RegisterClassW, SetLayeredWindowAttributes, SetTimer, ShowWindow,
     TranslateMessage, HTTRANSPARENT, LWA_ALPHA, MSG, SW_SHOWNOACTIVATE, WM_CLOSE, WM_DESTROY, WM_ERASEBKGND,
     WM_NCHITTEST, WM_PAINT, WM_TIMER, WNDCLASSW, WS_EX_LAYERED, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_EX_TOPMOST,
     WS_EX_TRANSPARENT, WS_POPUP,
@@ -34,46 +35,6 @@ thread_local! {
     static REMAINING: Cell<usize> = const { Cell::new(0) };
     /// Fenster des gewählten Monitors (wird blau gezeichnet).
     static SELECTED: Cell<isize> = const { Cell::new(0) };
-    /// Nummer (ab 1) je Fenster dieses Threads
-    static NUMBERS: RefCell<Vec<(isize, usize)>> = const { RefCell::new(Vec::new()) };
-}
-
-/// Welche der sieben Segmente (a oben, b oben rechts, c unten rechts, d unten, e unten links,
-/// f oben links, g Mitte) für die Ziffer leuchten. Bit 0 = a ... Bit 6 = g.
-const SEGMENTS: [u8; 10] = [
-    0b0111111, // 0: a b c d e f
-    0b0000110, // 1: b c
-    0b1011011, // 2: a b d e g
-    0b1001111, // 3: a b c d g
-    0b1100110, // 4: b c f g
-    0b1101101, // 5: a c d f g
-    0b1111101, // 6: a c d e f g
-    0b0000111, // 7: a b c
-    0b1111111, // 8: alle
-    0b1101111, // 9: a b c d f g
-];
-
-/// Zeichnet eine Ziffer als Segmentanzeige aus gefüllten Rechtecken (keine Schriftart nötig).
-unsafe fn draw_digit(hdc: isize, brush: isize, digit: usize, x: i32, y: i32, w: i32, h: i32) {
-    let t = (w / 5).max(3);
-    let mid = (h - t) / 2;
-    // (links, oben, rechts, unten) je Segment a..g
-    let rects = [
-        (x, y, x + w, y + t),
-        (x + w - t, y, x + w, y + mid + t),
-        (x + w - t, y + mid, x + w, y + h),
-        (x, y + h - t, x + w, y + h),
-        (x, y + mid, x + t, y + h),
-        (x, y, x + t, y + mid + t),
-        (x, y + mid, x + w, y + mid + t),
-    ];
-    let mask = SEGMENTS[digit % 10];
-    for (i, &(l, tp, r, b)) in rects.iter().enumerate() {
-        if mask & (1 << i) != 0 {
-            let rc = RECT { left: l, top: tp, right: r, bottom: b };
-            FillRect(hdc, &rc, brush);
-        }
-    }
 }
 
 fn forget(h: isize) {
@@ -89,24 +50,24 @@ unsafe fn paint(h: HWND) {
     GetClientRect(h, &mut rc);
 
     let selected = SELECTED.with(|s| s.get()) == h;
-    let bg = CreateSolidBrush(if selected { COL_SELECTED } else { COL_OTHER });
-    FillRect(hdc, &rc, bg);
-    DeleteObject(bg);
+    let brush = CreateSolidBrush(if selected { COL_SELECTED } else { COL_OTHER });
+    FillRect(hdc, &rc, brush);
+    DeleteObject(brush);
 
-    let number = NUMBERS.with(|n| n.borrow().iter().find(|(hw, _)| *hw == h).map(|&(_, v)| v)).unwrap_or(0);
-    let digits: Vec<usize> = number.to_string().bytes().map(|b| (b - b'0') as usize).collect();
-    let dh = rc.bottom * 55 / 100;
-    let dw = dh * 55 / 100;
-    let gap = dw / 3;
-    let total = digits.len() as i32 * dw + (digits.len() as i32 - 1) * gap;
-    let mut x = (rc.right - total) / 2;
-    let y = (rc.bottom - dh) / 2;
-    let fg = CreateSolidBrush(COL_TEXT);
-    for d in digits {
-        draw_digit(hdc, fg, d, x, y, dw, dh);
-        x += dw + gap;
-    }
-    DeleteObject(fg);
+    let face: Vec<u16> = "Segoe UI\0".encode_utf16().collect();
+    // Höhe negativ = Zeichenhöhe in Pixeln; 700 = fett; 1 = DEFAULT_CHARSET; 4 = ANTIALIASED_QUALITY
+    let font = CreateFontW(-(rc.bottom * 7 / 10), 0, 0, 0, 700, 0, 0, 0, 1, 0, 0, 4, 0, face.as_ptr());
+    let old = SelectObject(hdc, font);
+    SetBkMode(hdc, 1); // TRANSPARENT
+    SetTextColor(hdc, COL_TEXT);
+
+    let mut buf = [0u16; 16];
+    let n = GetWindowTextW(h, buf.as_mut_ptr(), buf.len() as i32);
+    // 0x25 = DT_CENTER | DT_VCENTER | DT_SINGLELINE
+    DrawTextW(hdc, buf.as_ptr(), n, &mut rc, 0x25);
+
+    SelectObject(hdc, old);
+    DeleteObject(font);
     EndPaint(h, &ps);
 }
 
@@ -190,7 +151,6 @@ pub fn show(monitors: &[(i32, i32, i32, i32)], selected: usize) {
             if hwnd == 0 {
                 continue;
             }
-            NUMBERS.with(|n| n.borrow_mut().push((hwnd, i + 1)));
             if i == selected {
                 SELECTED.with(|s| s.set(hwnd));
             }

@@ -163,7 +163,10 @@ fn build_style(p: &Pal, light: bool) -> egui::Style {
     v.window_fill = p.card;
     v.extreme_bg_color = p.input_bg;
     v.selection.bg_fill = p.sel_bg;
-    v.selection.stroke = Stroke::new(1.0_f32, p.accent);
+    // egui nimmt `selection.stroke` als Schriftfarbe ausgewählter Einträge (z. B. im Dropdown) und
+    // `selection.bg_fill` als deren Hintergrund. Beide dürfen nicht dieselbe Farbe haben.
+    let sel_text = if light { Color32::from_rgb(25, 55, 150) } else { Color32::from_rgb(240, 244, 255) };
+    v.selection.stroke = Stroke::new(1.0_f32, sel_text);
     v.hyperlink_color = p.accent;
     let r = Rounding::same(9.0);
     v.widgets.noninteractive.rounding = r;
@@ -597,33 +600,30 @@ impl eframe::App for App {
                                         .map(|m| m.label(self.s.monitor))
                                         .unwrap_or_else(|| "-".into());
                                     let before = self.s.monitor;
-                                    let row_width = ui.available_width();
-                                    ui.allocate_ui_with_layout(
-                                        egui::vec2(row_width, 30.0),
-                                        egui::Layout::right_to_left(egui::Align::Center),
-                                        |ui| {
-                                            if ui.button("Aktualisieren").clicked() {
-                                                refresh_mon = true;
+                                    // Auswahlliste über die volle Breite, die Buttons darunter. Zwei Buttons plus
+                                    // Liste in einer Zeile wurden breiter als die Karte, und das Fenster wuchs.
+                                    egui::ComboBox::new("mon", "")
+                                        .selected_text(label)
+                                        .width((ui.available_width() - 24.0).max(80.0))
+                                        .show_ui(ui, |ui| {
+                                            for (i, m) in self.monitors.iter().enumerate() {
+                                                ui.selectable_value(&mut self.s.monitor, i, m.label(i));
                                             }
-                                            if ui.button("Identifizieren").clicked() {
-                                                identify_monitors = true;
-                                            }
-                                            egui::ComboBox::new("mon", "")
-                                                .selected_text(label)
-                                                .width((ui.available_width() - 24.0).max(80.0))
-                                                .show_ui(ui, |ui| {
-                                                    for (i, m) in self.monitors.iter().enumerate() {
-                                                        ui.selectable_value(&mut self.s.monitor, i, m.label(i));
-                                                    }
-                                                });
-                                        },
-                                    );
+                                        });
+                                    ui.horizontal(|ui| {
+                                        if ui.button("Aktualisieren").clicked() {
+                                            refresh_mon = true;
+                                        }
+                                        if ui.button("Identifizieren").clicked() {
+                                            identify_monitors = true;
+                                        }
+                                    });
                                     // Wer einen anderen Monitor wählt, sieht sofort, welcher es ist
                                     if self.s.monitor != before {
                                         identify_monitors = true;
                                     }
                                     ui.label(
-                                        RichText::new("Die Nummer entspricht der Nummer in der Liste. Der gewählte Monitor ist blau.")
+                                        RichText::new("Nummer wie in der Liste, gewählter Monitor ist blau.")
                                             .size(12.5)
                                             .color(pal().muted),
                                     );
