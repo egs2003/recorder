@@ -47,13 +47,19 @@ pub enum UpState {
     Installing,
     /// neue exe liegt bereit, die App muss neu starten
     ReadyToRestart,
+    /// die neue Version wurde gestartet, diese Instanz schließt sich. Verhindert, dass der
+    /// Neustart in jedem weiteren Frame noch einmal ausgelöst wird (zweites Fenster).
+    Restarting,
     Failed(String),
 }
 
 impl UpState {
     /// Download/Installation läuft oder ist abgeschlossen: Aufnahme darf nicht starten.
     pub fn busy(&self) -> bool {
-        matches!(self, UpState::Downloading { .. } | UpState::Installing | UpState::ReadyToRestart)
+        matches!(
+            self,
+            UpState::Downloading { .. } | UpState::Installing | UpState::ReadyToRestart | UpState::Restarting
+        )
     }
 }
 

@@ -289,7 +289,7 @@ fn update_card(ui: &mut egui::Ui, st: &UpState, can_install: bool, install: &mut
                         ui.label(RichText::new(format!("{} heruntergeladen", mb(*done))).size(13.0));
                     }
                 }
-                UpState::Installing | UpState::ReadyToRestart => {
+                UpState::Installing | UpState::ReadyToRestart | UpState::Restarting => {
                     ui.label(RichText::new("Update wird installiert, die App startet gleich neu ...").size(16.0).strong());
                     ui.add(egui::ProgressBar::new(1.0).desired_height(10.0).fill(pal().accent).animate(true));
                 }
@@ -503,11 +503,18 @@ impl eframe::App for App {
             self.s.save();
             match update::restart() {
                 Ok(()) => {
+                    // Sofort merken: bis das Fenster wirklich zu ist, laufen evtl. noch Frames, und die
+                    // dürfen die App nicht noch einmal starten
+                    *self.upd.lock().unwrap() = UpState::Restarting;
                     ctx.send_viewport_cmd(egui::ViewportCommand::Close);
                     return;
                 }
                 Err(e) => *self.upd.lock().unwrap() = UpState::Failed(format!("{e:#}")),
             }
+        }
+        if matches!(*self.upd.lock().unwrap(), UpState::Restarting) {
+            ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+            return;
         }
 
         // Screenshot für die Bereichsauswahl abholen
