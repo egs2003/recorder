@@ -7,6 +7,8 @@ Portabler Bildschirm-Recorder mit Audio für Windows (Rust, egui, ffmpeg).
 - Speicherort: standardmäßig `videos\` neben der exe, frei wählbar
 - Einstellungen werden in `settings.json` neben der exe gespeichert
 - Monitor-Auswahl: "Aktualisieren" liest die Monitorliste neu ein (z. B. nach dem Anstecken eines Monitors). Der Button "Identifizieren" blendet auf jedem Monitor kurz dessen Nummer ein (der gewählte Monitor ist blau). Das passiert auch automatisch, wenn ein anderer Monitor gewählt wird.
+- Updates: Beim Start prüft die App im Hintergrund, ob es auf GitHub (Releases) eine neuere Version gibt. Gefragt wird erst, wenn es eine gibt; nach Bestätigung lädt die App `recorder.exe` herunter, ersetzt sich selbst und startet neu. Unter "Optionen" gibt es zusätzlich "Nach Updates suchen".
+  Jeder Push auf `main` veröffentlicht ein Release `v<Version aus Cargo.toml>`. Für ein Update muss die Version in `Cargo.toml` erhöht werden.
 - Design: dunkel oder hell, automatisch passend zur Windows-Einstellung (Wechsel zur Laufzeit wird übernommen)
 - Hardwarebeschleunigung (abschaltbar unter "Optionen"): Beim ersten Start wird per Probelauf geprüft, was dieser Rechner wirklich kann, nicht nur, was in ffmpeg einkompiliert ist.
   Versucht wird der Reihe nach: GPU-Aufnahme (ddagrab) + NVENC / QSV / AMF, GPU-Aufnahme + x264, GDI-Aufnahme + NVENC / QSV / AMF, zuletzt GDI-Aufnahme + x264 (läuft immer).

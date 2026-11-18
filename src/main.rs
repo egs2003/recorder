@@ -6,6 +6,7 @@ mod identify;
 mod indicator;
 mod plan;
 mod rec;
+mod update;
 mod winapi;
 
 use config::{Mode, Settings, SourceId};
@@ -17,6 +18,7 @@ use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering as AtomicOrdering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
+use update::UpState;
 
 pub const APP_TITLE: &str = "Bildschirm-Recorder";
 const VERSION: &str = env!("CARGO_PKG_VERSION");
@@ -114,6 +116,7 @@ struct App {
     devices: Vec<(SourceId, String)>,
     rec: Option<rec::Handle>,
     ff: Arc<Mutex<FfState>>,
+    upd: Arc<Mutex<UpState>>,
     picker: Option<Picker>,
     shot: Arc<Mutex<Option<Shot>>>,
     shot_pending: bool,
@@ -233,6 +236,76 @@ fn mb(b: u64) -> String {
     format!("{:.0} MB", b as f64 / 1_048_576.0)
 }
 
+/// Hinweis zum Update: Rückfrage bei neuer Version, Fortschritt, Fehler. Setzt `install`/`dismiss`.
+fn update_card(ui: &mut egui::Ui, st: &UpState, can_install: bool, install: &mut bool, dismiss: &mut bool) {
+    let failed = matches!(st, UpState::Failed(_));
+    if !failed && !matches!(st, UpState::Available(_)) && !st.busy() {
+        return;
+    }
+    let (fill, accent) = if failed { (pal().err_bg, pal().red) } else { (pal().info_bg, pal().accent) };
+    let text = if failed { pal().err_text } else { pal().info_text };
+    egui::Frame::none()
+        .fill(fill)
+        .stroke(egui::Stroke::new(1.0_f32, accent))
+        .rounding(14.0)
+        .inner_margin(egui::Margin::same(14.0))
+        .show(ui, |ui| {
+            ui.set_width(ui.available_width());
+            match st {
+                UpState::Available(r) => {
+                    ui.label(RichText::new(format!("Neue Version {} verfügbar", r.version)).size(16.0).strong());
+                    ui.label(
+                        RichText::new(format!(
+                            "Installiert ist Version {}. Die neue Version wird von GitHub heruntergeladen, danach startet die App neu.",
+                            update::CURRENT
+                        ))
+                        .size(12.5)
+                        .color(text),
+                    );
+                    let notes: String = r.notes.lines().take(4).collect::<Vec<_>>().join("\n");
+                    let notes: String = notes.chars().take(300).collect();
+                    if !notes.trim().is_empty() {
+                        ui.label(RichText::new(notes).size(12.5).color(pal().muted));
+                    }
+                    ui.horizontal(|ui| {
+                        if ui.add_enabled(can_install, egui::Button::new("Jetzt aktualisieren")).clicked() {
+                            *install = true;
+                        }
+                        if ui.button("Später").clicked() {
+                            *dismiss = true;
+                        }
+                        if !can_install {
+                            ui.label(RichText::new("Während der Aufnahme nicht möglich.").size(12.5).color(pal().muted));
+                        }
+                    });
+                }
+                UpState::Downloading { done, total } => {
+                    ui.label(RichText::new("Update wird heruntergeladen").size(16.0).strong());
+                    if *total > 0 {
+                        ui.add(egui::ProgressBar::new((*done as f32 / *total as f32).min(1.0)).desired_height(10.0).fill(pal().accent));
+                        ui.label(RichText::new(format!("{} von {}", mb(*done), mb(*total))).size(13.0));
+                    } else {
+                        ui.add(egui::ProgressBar::new(0.0).desired_height(10.0).fill(pal().accent).animate(true));
+                        ui.label(RichText::new(format!("{} heruntergeladen", mb(*done))).size(13.0));
+                    }
+                }
+                UpState::Installing | UpState::ReadyToRestart => {
+                    ui.label(RichText::new("Update wird installiert, die App startet gleich neu ...").size(16.0).strong());
+                    ui.add(egui::ProgressBar::new(1.0).desired_height(10.0).fill(pal().accent).animate(true));
+                }
+                UpState::Failed(e) => {
+                    ui.label(RichText::new("Update nicht möglich").size(16.0).strong());
+                    ui.label(RichText::new(e).size(13.0).color(text));
+                    if ui.button("Schließen").clicked() {
+                        *dismiss = true;
+                    }
+                }
+                _ => {}
+            }
+        });
+    ui.add_space(8.0);
+}
+
 fn ffmpeg_card(ui: &mut egui::Ui, st: &FfState, retry: &mut bool) {
     let failed = matches!(st, FfState::Failed(_));
     let (fill, accent) = if failed { (pal().err_bg, pal().red) } else { (pal().info_bg, pal().accent) };
@@ -310,7 +383,12 @@ impl App {
         }
         let ff = Arc::new(Mutex::new(FfState::Checking));
         ffmpeg::ensure(ff.clone(), ctx.clone());
+        // Update-Prüfung beim Start: ohne Nachfrage und still; gefragt wird erst, wenn es etwas gibt
+        update::cleanup();
+        let upd = Arc::new(Mutex::new(UpState::Idle));
+        update::check(upd.clone(), ctx.clone(), false);
         App {
+            upd,
             s,
             monitors: winapi::list_monitors(),
             windows: winapi::list_windows(),
@@ -420,6 +498,18 @@ impl eframe::App for App {
         // Palette des aktuellen Systemdesigns (dunkel/hell) für diesen Frame
         IS_LIGHT.store(ctx.theme() == egui::Theme::Light, AtomicOrdering::Relaxed);
 
+        // Update ist installiert: Einstellungen sichern, neue Version starten, diese beenden
+        if matches!(*self.upd.lock().unwrap(), UpState::ReadyToRestart) {
+            self.s.save();
+            match update::restart() {
+                Ok(()) => {
+                    ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+                    return;
+                }
+                Err(e) => *self.upd.lock().unwrap() = UpState::Failed(format!("{e:#}")),
+            }
+        }
+
         // Screenshot für die Bereichsauswahl abholen
         if self.shot_pending {
             let res = self.shot.lock().unwrap().take();
@@ -451,7 +541,13 @@ impl eframe::App for App {
         }
         let ffst = self.ff.lock().unwrap().clone();
         let ff_ready = matches!(ffst, FfState::Ready);
+        let upst = self.upd.lock().unwrap().clone();
+        // Während Download/Installation darf nichts aufgenommen werden, der Neustart würde es beenden
+        let updating = upst.busy();
 
+        let mut install_upd = false;
+        let mut dismiss_upd = false;
+        let mut check_upd = false;
         let mut start = false;
         let mut stop = false;
         let mut grab = false;
@@ -491,7 +587,10 @@ impl eframe::App for App {
                         }
                         _ => {
                             if ui
-                                .add_enabled(ff_ready, big("Aufnahme starten".into(), if ff_ready { pal().red } else { pal().widget }))
+                                .add_enabled(
+                                    ff_ready && !updating,
+                                    big("Aufnahme starten".into(), if ff_ready && !updating { pal().red } else { pal().widget }),
+                                )
                                 .clicked()
                             {
                                 start = true;
@@ -572,12 +671,14 @@ impl eframe::App for App {
                     });
                     ui.add_space(2.0);
 
+                    update_card(ui, &upst, !active, &mut install_upd, &mut dismiss_upd);
+
                     // Während des Downloads ist alles gesperrt
                     if !ff_ready && !matches!(ffst, FfState::Checking) {
                         ffmpeg_card(ui, &ffst, &mut retry_ff);
                     }
 
-                    ui.add_enabled_ui(!active && ff_ready, |ui| {
+                    ui.add_enabled_ui(!active && ff_ready && !updating, |ui| {
                         card(ui, "Aufnahmebereich", |ui| {
                             segmented(
                                 ui,
@@ -749,12 +850,40 @@ impl eframe::App for App {
                                     .size(12.5)
                                     .color(pal().muted),
                             );
+                            ui.horizontal(|ui| {
+                                let searching = matches!(upst, UpState::Checking);
+                                if ui.add_enabled(!searching, egui::Button::new("Nach Updates suchen")).clicked() {
+                                    check_upd = true;
+                                }
+                                let status = match &upst {
+                                    UpState::Checking => "Suche läuft ...".to_string(),
+                                    UpState::UpToDate => format!("Version {VERSION} ist aktuell."),
+                                    _ => format!("Version {VERSION}"),
+                                };
+                                ui.label(RichText::new(status).size(12.5).color(pal().muted));
+                            });
                         });
                     });
 
                 });
             });
 
+        if install_upd {
+            let rel = match &*self.upd.lock().unwrap() {
+                UpState::Available(r) => Some(r.clone()),
+                _ => None,
+            };
+            if let Some(r) = rel {
+                self.s.save();
+                update::install(self.upd.clone(), ctx.clone(), r);
+            }
+        }
+        if dismiss_upd {
+            *self.upd.lock().unwrap() = UpState::Idle;
+        }
+        if check_upd {
+            update::check(self.upd.clone(), ctx.clone(), true);
+        }
         if retry_ff {
             ffmpeg::ensure(self.ff.clone(), ctx.clone());
         }
