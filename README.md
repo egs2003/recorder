@@ -10,6 +10,7 @@ Portabler Bildschirm-Recorder mit Audio für Windows (Rust, egui, ffmpeg).
 - Updates: Beim Start prüft die App im Hintergrund, ob es auf GitHub (Releases) eine neuere Version gibt. Gefragt wird erst, wenn es eine gibt; nach Bestätigung lädt die App `recorder.exe` herunter, ersetzt sich selbst und startet neu. Unter "Optionen" gibt es zusätzlich "Nach Updates suchen".
   Jeder Push auf `main` veröffentlicht ein Release `v<Version aus Cargo.toml>`. Für ein Update muss die Version in `Cargo.toml` erhöht werden.
 - Design: dunkel oder hell, automatisch passend zur Windows-Einstellung (Wechsel zur Laufzeit wird übernommen)
+- Icon: Monitor mit rotem Aufnahmepunkt (`assets/icon.ico` in der exe, `assets/icon.rgba` für das Fenster).
 - Hardwarebeschleunigung (abschaltbar unter "Optionen"): Beim ersten Start wird per Probelauf geprüft, was dieser Rechner wirklich kann, nicht nur, was in ffmpeg einkompiliert ist.
   Versucht wird der Reihe nach: GPU-Aufnahme (ddagrab) + NVENC / QSV / AMF, GPU-Aufnahme + x264, GDI-Aufnahme + NVENC / QSV / AMF, zuletzt GDI-Aufnahme + x264 (läuft immer).
   Schlägt ein Start fehl, wird automatisch die nächste Variante probiert. Das verwendete Verfahren steht während der Aufnahme in der Statuszeile.

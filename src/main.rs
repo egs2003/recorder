@@ -949,13 +949,23 @@ impl eframe::App for App {
     }
 }
 
+/// Fenster-Icon (128x128 RGBA, aus assets/icon.rgba)
+fn window_icon() -> egui::IconData {
+    egui::IconData {
+        rgba: include_bytes!("../assets/icon.rgba").to_vec(),
+        width: 128,
+        height: 128,
+    }
+}
+
 fn main() -> eframe::Result<()> {
     winapi::set_dpi_aware();
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_inner_size(SMALL)
             .with_min_inner_size([520.0, 520.0])
-            .with_title(APP_TITLE),
+            .with_title(APP_TITLE)
+            .with_icon(window_icon()),
         ..Default::default()
     };
     eframe::run_native(
